@@ -41,7 +41,13 @@ from ultralytics.utils import (
     emojis,
 )
 from ultralytics.utils.autobatch import check_train_batch_size
-from ultralytics.utils.lora import apply_lora, save_lora_adapters, LoraTrainingStrategy, get_lora_training_stats
+from ultralytics.utils.lora import (
+    LoraTrainingStrategy,
+    apply_lora,
+    get_lora_training_stats,
+    resolve_adalora_total_step,
+    save_lora_adapters,
+)
 from ultralytics.utils.checks import check_amp, check_file, check_imgsz, check_model_file_from_stem, print_args
 from ultralytics.utils.dist import ddp_cleanup, generate_ddp_command
 from ultralytics.utils.files import get_latest_run
@@ -61,6 +67,31 @@ from ultralytics.utils.torch_utils import (
     unset_deterministic,
     unwrap_model,
 )
+
+
+def save_trainer_args_yaml(save_dir: Path, args) -> None:
+    """Persist trainer arguments to args.yaml, serializing complex augmentation objects safely."""
+    args_dict = vars(args).copy()
+    if args_dict.get("augmentations") is not None:
+        args_dict["augmentations"] = [repr(t) for t in args_dict["augmentations"]]
+    YAML.save(save_dir / "args.yaml", args_dict)
+
+
+def update_args_with_lora_runtime_metadata(args, model) -> None:
+    """Copy runtime LoRA metadata from the adapted model onto trainer args."""
+    base_model = getattr(model, "module", model)
+    metadata = getattr(base_model, "lora_runtime_metadata", {}) or {}
+    if not metadata:
+        return
+
+    if "requested_backend" in metadata:
+        args.requested_lora_backend = metadata["requested_backend"]
+    if "effective_backend" in metadata:
+        args.effective_lora_backend = metadata["effective_backend"]
+    if "requested_init_lora_weights" in metadata:
+        args.requested_lora_init_lora_weights = metadata["requested_init_lora_weights"]
+    if "effective_init_lora_weights" in metadata:
+        args.effective_lora_init_lora_weights = metadata["effective_init_lora_weights"]
 
 
 class BaseTrainer:
@@ -139,12 +170,7 @@ class BaseTrainer:
         if RANK in {-1, 0}:
             self.wdir.mkdir(parents=True, exist_ok=True)  # make dir
             self.args.save_dir = str(self.save_dir)
-            # Save run args, serializing augmentations as reprs for resume compatibility
-            args_dict = vars(self.args).copy()
-            if args_dict.get("augmentations") is not None:
-                # Serialize Albumentations transforms as their repr strings for checkpoint compatibility
-                args_dict["augmentations"] = [repr(t) for t in args_dict["augmentations"]]
-            YAML.save(self.save_dir / "args.yaml", args_dict)  # save run args
+            save_trainer_args_yaml(self.save_dir, self.args)
         self.last, self.best = self.wdir / "last.pt", self.wdir / "best.pt"  # checkpoint paths
         self.save_period = self.args.save_period
 
@@ -267,7 +293,56 @@ class BaseTrainer:
         """Build dataloaders and optimizer on correct rank process."""
         ckpt = self.setup_model()
         self.model = self.model.to(self.device)
+        self.set_model_attributes()
+
+        # Check imgsz
+        gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
+        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
+        self.stride = gs  # for multiscale training
+
+        # Batch size
+        if self.batch_size < 1 and RANK == -1:  # single-GPU only, estimate best batch size
+            self.args.batch = self.batch_size = self.auto_batch()
+
+        # Dataloaders
+        batch_size = self.batch_size // max(self.world_size, 1)
+        self.train_loader = self.get_dataloader(
+            self.data["train"], batch_size=batch_size, rank=LOCAL_RANK, mode="train"
+        )
+        # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
+        self.test_loader = self.get_dataloader(
+            self.data.get("val") or self.data.get("test"),
+            batch_size=batch_size if self.args.task == "obb" else batch_size * 2,
+            rank=LOCAL_RANK,
+            mode="val",
+        )
+        self.validator = self.get_validator()
+        if RANK in {-1, 0}:
+            metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix="val")
+            self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
+            if self.args.plots:
+                self.plot_training_labels()
+
+        # Optimizer
+        self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
+        weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
+        iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
+
+        resolved_lora_total_step = resolve_adalora_total_step(
+            getattr(self.args, "lora_type", "lora"),
+            getattr(self.args, "lora_total_step", None),
+            iterations,
+        )
+        if str(getattr(self.args, "lora_type", "lora")).lower() == "adalora":
+            self.args.lora_total_step = resolved_lora_total_step
+            LOGGER.info(f"[LoRA] AdaLoRA total_step resolved to {resolved_lora_total_step}.")
+            if RANK in {-1, 0}:
+                save_trainer_args_yaml(self.save_dir, self.args)
+
         self.model = apply_lora(self.model, self.args)
+        update_args_with_lora_runtime_metadata(self.args, self.model)
+        if RANK in {-1, 0}:
+            save_trainer_args_yaml(self.save_dir, self.args)
         self.set_model_attributes()
 
         # Compile model
@@ -311,39 +386,7 @@ class BaseTrainer:
         if self.world_size > 1:
             self.model = nn.parallel.DistributedDataParallel(self.model, device_ids=[RANK], find_unused_parameters=True)
 
-        # Check imgsz
-        gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
-        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
-        self.stride = gs  # for multiscale training
-
-        # Batch size
-        if self.batch_size < 1 and RANK == -1:  # single-GPU only, estimate best batch size
-            self.args.batch = self.batch_size = self.auto_batch()
-
-        # Dataloaders
-        batch_size = self.batch_size // max(self.world_size, 1)
-        self.train_loader = self.get_dataloader(
-            self.data["train"], batch_size=batch_size, rank=LOCAL_RANK, mode="train"
-        )
-        # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
-        self.test_loader = self.get_dataloader(
-            self.data.get("val") or self.data.get("test"),
-            batch_size=batch_size if self.args.task == "obb" else batch_size * 2,
-            rank=LOCAL_RANK,
-            mode="val",
-        )
-        self.validator = self.get_validator()
         self.ema = ModelEMA(self.model)
-        if RANK in {-1, 0}:
-            metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix="val")
-            self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
-            if self.args.plots:
-                self.plot_training_labels()
-
-        # Optimizer
-        self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
-        weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
-        iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
         self.optimizer = self.build_optimizer(
             model=self.model,
             name=self.args.optimizer,
@@ -369,9 +412,17 @@ class BaseTrainer:
                 # Strategy 1: Layer-wise LR decay (apply to optimizer)
                 lora_layer_decay = getattr(self.args, 'lora_layer_decay', 0.0)
                 if lora_layer_decay > 0:
+                    n_before = len(self.optimizer.param_groups)
                     self.lora_strategy.apply_layer_decay_to_optimizer(
                         self.optimizer, decay_rate=lora_layer_decay
                     )
+                    n_after = len(self.optimizer.param_groups)
+                    # If apply_layer_decay_to_optimizer added new param groups (LoRA
+                    # params split by depth), we must rebuild the LR scheduler so that
+                    # its internal lr_lambdas list matches the new group count.
+                    # Otherwise `scheduler.step()` will raise ValueError in zip(strict=True).
+                    if n_after != n_before:
+                        self._setup_scheduler()
                 
                 # Strategy 2: Alpha warmup preparation
                 lora_alpha_warmup = getattr(self.args, 'lora_alpha_warmup', 0)
