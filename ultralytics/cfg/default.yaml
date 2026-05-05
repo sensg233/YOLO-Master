@@ -154,7 +154,7 @@ lora_auto_r_ratio: 0.0 # (float) Auto calculate LoRA rank based on params ratio
 lora_use_dora: False # (bool) Enable DoRA (Weight-Decomposed Low-Rank Adaptation)
 lora_use_rslora: True # (bool) Enable RS-LoRA scaling for better high-rank stability
 lora_init_lora_weights: True # (bool|str) LoRA init mode: True/False for standard init, or "gaussian". "pissa"/"olora" require newer PEFT.
-lora_type: "lora" # (str) PEFT type: "lora", "loha", "lokr"
+lora_type: "lora" # (str) PEFT type: "lora", "loha", "lokr", "adalora", "ia3", "oft", "boft"
 lora_quantization: "none" # (str) Quantization type: "none", "4bit", "8bit" (Requires bitsandbytes)
 lora_include_moe: False # (bool) Include MoE layers in auto-detection
 lora_include_attention: False # (bool) Include Attention layers in auto-detection
@@ -179,6 +179,15 @@ lora_beta1: 0.85 # (float) AdaLoRA EMA beta1 for sensitivity tracking
 lora_beta2: 0.85 # (float) AdaLoRA EMA beta2 for uncertainty tracking
 lora_orth_reg_weight: 0.5 # (float) AdaLoRA orthogonal regularization weight
 lora_total_step: 0 # (int) AdaLoRA total training steps; 0 lets trainer auto-resolve from iterations
+
+# OFT / BOFT specific (only used when lora_type=oft or lora_type=boft)
+lora_oft_block_size: 0 # (int) OFT block size (>0 overrides rank r)
+lora_oft_coft: False # (bool) OFT: use constrained Cayley-Neumann rotation
+lora_oft_eps: 6.0e-5 # (float) OFT numerical eps
+lora_oft_block_share: False # (bool) OFT: share rotation across blocks
+lora_boft_block_size: 4 # (int) BOFT butterfly block size
+lora_boft_block_num: 0 # (int) BOFT number of blocks (0 = auto from block_size)
+lora_boft_n_butterfly_factor: 2 # (int) BOFT butterfly factor (paper default)
 
 # LoRA Training Strategies (advanced)
 lora_layer_decay: 0.0 # (float) Layer-wise LR decay rate (0=disabled, 0.85~0.95 typical)

@@ -21,11 +21,14 @@ from ultralytics.nn.tasks import (
 try:
     from peft import (
         LoraConfig, LoHaConfig, LoKrConfig, AdaLoraConfig,
+        IA3Config, OFTConfig, BOFTConfig,
         get_peft_model, PeftModel
     )
     PEFT_AVAILABLE = True
 except ImportError:
-    LoraConfig = LoHaConfig = LoKrConfig = AdaLoraConfig = get_peft_model = PeftModel = None
+    LoraConfig = LoHaConfig = LoKrConfig = AdaLoraConfig = None
+    IA3Config = OFTConfig = BOFTConfig = None
+    get_peft_model = PeftModel = None
     PEFT_AVAILABLE = False
     
     # Define a dummy class to pass type checks when PEFT is missing
@@ -532,7 +535,10 @@ def supports_peft_request(config: "LoRAConfig") -> bool:
     variant = str(getattr(config, "variant", getattr(config, "peft_type", "lora"))).lower()
     if variant == "dora":
         return bool(PEFT_AVAILABLE and getattr(config, "use_dora", False))
-    return bool(PEFT_AVAILABLE and variant in {"lora", "adalora", "loha", "lokr"})
+    return bool(PEFT_AVAILABLE and variant in {
+        "lora", "adalora", "loha", "lokr",
+        "ia3", "oft", "boft",
+    })
 
 
 def supports_fallback_request(config: "LoRAConfig") -> bool:
@@ -1117,9 +1123,19 @@ class LoRAConfig:
     use_dora: bool = False # Enable DoRA (Weight-Decomposed Low-Rank Adaptation)
     use_rslora: bool = True # Enable Rank-Stabilized LoRA scaling (alpha / sqrt(r))
     init_lora_weights: Union[str, bool] = True # LoRA init mode: True/False for std init, or "gaussian"/"pissa"/"olora"
-    peft_type: str = "lora" # Options: "lora", "loha", "lokr"
+    peft_type: str = "lora" # Options: "lora", "loha", "lokr", "adalora", "ia3", "oft", "boft"
     quantization: str = "none" # Options: "none", "4bit", "8bit" (Requires bitsandbytes)
     only_3x3: bool = False # Skip 1x1 convs during auto target selection
+
+    # OFT / BOFT specific (ignored for other variants)
+    oft_block_size: int = 0          # OFT: block size (>0 overrides r)
+    oft_coft: bool = False           # OFT: use constrained (Cayley-Neumann) rotations
+    oft_eps: float = 6e-5            # OFT: numerical eps
+    oft_block_share: bool = False    # OFT: share rotation across blocks
+    boft_block_size: int = 4         # BOFT: butterfly block size
+    boft_block_num: int = 0          # BOFT: number of butterfly blocks (0 = auto)
+    boft_n_butterfly_factor: int = 2 # BOFT: butterfly factor (paper default)
+
     target_r: int = 8 # AdaLoRA target rank
     init_r: int = 12 # AdaLoRA initial rank
     tinit: int = 0 # AdaLoRA warmup steps before pruning
@@ -1247,6 +1263,13 @@ class LoRAConfig:
             "peft_type": "lora_type",
             "quantization": "lora_quantization",
             "only_3x3": "lora_only_3x3",
+            "oft_block_size": "lora_oft_block_size",
+            "oft_coft": "lora_oft_coft",
+            "oft_eps": "lora_oft_eps",
+            "oft_block_share": "lora_oft_block_share",
+            "boft_block_size": "lora_boft_block_size",
+            "boft_block_num": "lora_boft_block_num",
+            "boft_n_butterfly_factor": "lora_boft_n_butterfly_factor",
             "target_r": "lora_target_r",
             "init_r": "lora_init_r",
             "tinit": "lora_tinit",
@@ -1320,6 +1343,13 @@ class LoRAConfigBuilder:
     # YOLO12 Area-Attention pattern: matches Conv2d-based qkv/proj/pe submodules.
     # Excluded from LoRA targets by default to avoid breaking softmax numerical stability.
     _PAT_AREA_ATTN = re.compile(r"\.attn\.(qkv|proj|pe)(\.|$)", re.IGNORECASE)
+    # YOLO12 ABlock-internal MLP pattern: ABlock has no LayerNorm; LoRA on the
+    # post-attention residual MLP path also causes gradient explosion (→ NaN
+    # mid-training). Match the *.m.<n>.<k>.mlp.<*>.conv path that lives inside
+    # A2C2f -> ABlock and is therefore on the same residual stream as AAttn.
+    _PAT_AREA_ATTN_MLP = re.compile(
+        r"\.m\.\d+\.\d+\.mlp\.\d+(\.|$)", re.IGNORECASE
+    )
     _PAT_INDEX = re.compile(r"^(\d+)\.") # Matches "0" in "0.conv"
     _PAT_INDEX_ANY = re.compile(r"(?:^|\.)(\d+)\.")  # Matches first numeric segment anywhere (e.g. "model.5.m.0.cv1" -> 5)
 
@@ -1506,6 +1536,14 @@ class LoRAConfigBuilder:
                 if is_conv and LoRAConfigBuilder._PAT_AREA_ATTN.search(lname):
                     LOGGER.debug(f"[LoRA] Skip Area-Attention conv {name} (include_attention=False)")
                     continue
+                # ABlock-internal MLP convs share the AAttn residual stream and
+                # have no LayerNorm; LoRA injection here triggers gradient
+                # explosion → NaN around epoch ~9–14 in YOLO12 training.
+                if is_conv and LoRAConfigBuilder._PAT_AREA_ATTN_MLP.search(lname):
+                    LOGGER.debug(
+                        f"[LoRA] Skip ABlock-MLP conv {name} (include_attention=False)"
+                    )
+                    continue
 
             targets.add(name)
 
@@ -1564,7 +1602,8 @@ class LoRAConfigBuilder:
         auto_r_ratio: float = 0.0,
         peft_type: str = "lora",
         **kwargs
-    ) -> Union['LoraConfig', 'LoHaConfig', 'LoKrConfig', None]:
+    ) -> Union['LoraConfig', 'LoHaConfig', 'LoKrConfig',
+               'IA3Config', 'OFTConfig', 'BOFTConfig', None]:
         """Factory method: Generates a PEFT Config object."""
         
         targets = kwargs.get('target_modules')
@@ -1718,7 +1757,89 @@ class LoRAConfigBuilder:
             adalora_kwargs["total_step"] = total_step
 
             return AdaLoraConfig(**adalora_kwargs)
-            
+
+        elif peft_type == "ia3":
+            # IA3: only (IA)^3 scaling vectors — no rank, very few params.
+            # Works on nn.Linear and nn.Conv2d (PEFT 0.18+).
+            # For YOLO we treat every target as a feedforward module since
+            # the backbone has no explicit FFN / attn split.
+            return IA3Config(
+                target_modules=common_kwargs["target_modules"],
+                exclude_modules=common_kwargs.get("exclude_modules"),
+                feedforward_modules=common_kwargs["target_modules"],
+                init_ia3_weights=bool(kwargs.get("init_lora_weights", True)),
+                task_type=common_kwargs.get("task_type"),
+                modules_to_save=kwargs.get("modules_to_save"),
+            )
+
+        elif peft_type == "oft":
+            # OFT: Orthogonal Fine-Tuning (block-diagonal Cayley rotations).
+            # PEFT 0.18 requires exactly ONE of {r, oft_block_size}; its default
+            # oft_block_size=32 collides with our common r. To keep the API
+            # consistent, we ignore r entirely in OFT mode and drive capacity
+            # through oft_block_size (user-provided or paper default 32).
+            oft_block_size = int(kwargs.get("oft_block_size", 0) or 0) or 32
+            return OFTConfig(
+                target_modules=common_kwargs["target_modules"],
+                exclude_modules=common_kwargs.get("exclude_modules"),
+                oft_block_size=oft_block_size,
+                module_dropout=kwargs.get("dropout", 0.0),
+                bias=kwargs.get("bias", "none"),
+                coft=bool(kwargs.get("oft_coft", False)),
+                eps=float(kwargs.get("oft_eps", 6e-5)),
+                block_share=bool(kwargs.get("oft_block_share", False)),
+                task_type=common_kwargs.get("task_type"),
+                modules_to_save=kwargs.get("modules_to_save"),
+            )
+
+        elif peft_type == "boft":
+            # BOFT: Butterfly OFT (block-butterfly Cayley rotations).
+            # PEFT BOFT requires both Conv in_features AND its effective kernel
+            # dim (in_c * kH * kW) to be divisible by boft_block_size.
+            # Narrow or 3x3 layers often break this, so we pre-filter targets.
+            boft_block_size = int(kwargs.get("boft_block_size", 4))
+            raw_targets = common_kwargs["target_modules"]
+            # raw_targets may already be a regex string after _build_peft_exact_target_regex.
+            # For the divisibility check we need the literal list; fall back to model scan.
+            modules_dict = dict(model.named_modules())
+            def _boft_ok(name: str) -> bool:
+                mod = modules_dict.get(name)
+                if mod is None:
+                    return True  # unknown — let PEFT decide
+                if isinstance(mod, nn.Conv2d):
+                    kdim = mod.in_channels * mod.kernel_size[0] * mod.kernel_size[1]
+                    return mod.in_channels % boft_block_size == 0 and kdim % boft_block_size == 0
+                if isinstance(mod, nn.Linear):
+                    return mod.in_features % boft_block_size == 0
+                return True
+            if isinstance(raw_targets, list):
+                filtered = [t for t in raw_targets if _boft_ok(t)]
+                dropped = len(raw_targets) - len(filtered)
+                if dropped:
+                    LOGGER.warning(
+                        f"[LoRA] BOFT dropped {dropped} targets whose channels/kernel "
+                        f"are not divisible by boft_block_size={boft_block_size}."
+                    )
+                if not filtered:
+                    raise ValueError(
+                        f"BOFT: no target layer is compatible with "
+                        f"boft_block_size={boft_block_size}. Try boft_block_size=1 or 2."
+                    )
+                target_list = filtered
+            else:
+                target_list = raw_targets
+            return BOFTConfig(
+                target_modules=target_list,
+                exclude_modules=common_kwargs.get("exclude_modules"),
+                boft_block_size=boft_block_size,
+                boft_block_num=int(kwargs.get("boft_block_num", 0)),
+                boft_n_butterfly_factor=int(kwargs.get("boft_n_butterfly_factor", 2)),
+                boft_dropout=float(kwargs.get("dropout", 0.0)),
+                bias=kwargs.get("bias", "none"),
+                task_type=common_kwargs.get("task_type"),
+                modules_to_save=kwargs.get("modules_to_save"),
+            )
+
         else: # Default to LoRA (and DoRA)
             lora_kwargs = {
                 "lora_alpha": alpha,
@@ -1846,11 +1967,14 @@ def apply_lora(
     # 2.6 YOLO12 Area-Attention safety guard.
     # AAttn uses Conv2d-based softmax attention; LoRA injection here easily causes
     # numerical collapse (symptom: loss drops to 0 and mAP/P/R become 0 mid-training).
-    # Default behavior: drop attn.{qkv,proj,pe} targets + force alpha warmup when enabled.
+    # Default behavior: drop attn.{qkv,proj,pe} *and* the ABlock-internal MLP conv
+    # path (which sits on the same residual stream and has no LayerNorm), plus
+    # force alpha warmup when enabled.
     if has_area_attn:
         LOGGER.warning(
             "[LoRA] YOLO12/A2C2f Area-Attention detected. "
-            "Applying safety guards: (1) exclude attn.{qkv,proj,pe} from LoRA targets, "
+            "Applying safety guards: (1) exclude attn.{qkv,proj,pe} and "
+            "ABlock-internal mlp Conv2d from LoRA targets, "
             "(2) force alpha_warmup>=3 epochs if unset, (3) cap lora_lr_mult<=1.0."
         )
         # Force minimum alpha warmup (keep larger user-set values)
@@ -1914,6 +2038,13 @@ def apply_lora(
         "init_lora_weights": config.init_lora_weights,
         "peft_type": config.peft_type,
         "only_3x3": config.only_3x3,
+        "oft_block_size": getattr(config, "oft_block_size", 0),
+        "oft_coft": getattr(config, "oft_coft", False),
+        "oft_eps": getattr(config, "oft_eps", 6e-5),
+        "oft_block_share": getattr(config, "oft_block_share", False),
+        "boft_block_size": getattr(config, "boft_block_size", 4),
+        "boft_block_num": getattr(config, "boft_block_num", 0),
+        "boft_n_butterfly_factor": getattr(config, "boft_n_butterfly_factor", 2),
         "target_r": config.target_r,
         "init_r": config.init_r,
         "tinit": config.tinit,
