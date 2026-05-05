@@ -693,11 +693,15 @@ def _replace_conv_with_manual_lora(module: nn.Module, config: "LoRAConfig", pref
 
 
 def _compute_layer_rank(conv: nn.Conv2d, base_r: int, module_name: str, total_layers: int = 23) -> int:
-    """Compute per-layer LoRA rank based on depth and channel width (v3).
-    
-    Shallow layers (early feature extraction) get larger rank.
-    Deep layers (semantic) get smaller rank.
-    Wider channel layers get proportionally larger rank.
+    """Compute per-layer LoRA rank from depth, channel width, and capacity bound.
+
+    Design goals:
+      - Shallow layers (early feature extraction) get a larger rank.
+      - Deep layers (semantic / task-specific) get a smaller rank.
+      - Wider-channel layers get proportionally larger rank.
+      - Capacity bound: rank never exceeds min(in_channels, out_channels) // 2,
+        so LoRA stays genuinely low-rank and does not collapse to a full-rank
+        reparameterization on narrow layers.
     """
     # Extract layer index from module name (e.g., "model.5.m.0.cv1" -> 5)
     layer_idx = 0
@@ -705,21 +709,30 @@ def _compute_layer_rank(conv: nn.Conv2d, base_r: int, module_name: str, total_la
         if part.isdigit():
             layer_idx = int(part)
             break
-    
+
     # Depth factor: shallow layers (idx=0) -> 1.0, deep layers -> 0.5
     depth_factor = 1.0 - 0.5 * (layer_idx / max(total_layers, 1))
-    
+
     # Channel factor: wider channels -> larger rank
     channels_factor = min(conv.out_channels / 64.0, 2.0)
-    
-    # Compute rank
+
+    # Raw rank
     r = int(base_r * depth_factor * channels_factor)
-    
-    # Ensure divisible by groups
+
+    # Capacity bound: enforce r <= min(in, out) // 2 to keep low-rank semantics.
+    # Without this, narrow layers (e.g. 16x8) can receive r=16 which is a full-rank
+    # (or super-rank) reparameterization and wastes capacity.
+    cap = max(1, min(conv.in_channels, conv.out_channels) // 2)
+    r = min(r, cap)
+
+    # Floor: keep at least rank 4 for any detected target (or `groups`, whichever larger)
     groups = max(conv.groups, 1)
+    r = max(r, min(4, cap))
+
+    # Ensure divisible by groups (required by PEFT Conv2d)
     r = (r // groups) * groups
-    r = max(r, groups)  # At least groups
-    
+    r = max(r, groups)
+
     return r
 
 
@@ -1094,6 +1107,10 @@ class LoRAConfig:
     allow_depthwise: bool = False
     kernels: Optional[List[int]] = None
 
+    # Capacity allocation knobs
+    skip_stem: bool = False  # Skip backbone stem (first 3 top-level layers)
+    min_channels: int = 0    # Skip narrow layers (min(in, out) below this threshold)
+
     # Advanced Options
     gradient_checkpointing: bool = False
     auto_r_ratio: float = 0.0 # Automatically calculate R based on parameter ratio
@@ -1219,6 +1236,8 @@ class LoRAConfig:
             "to_layer": "lora_to_layer",
             "allow_depthwise": "lora_allow_depthwise", 
             "kernels": "lora_kernels",
+            "skip_stem": "lora_skip_stem",
+            "min_channels": "lora_min_channels",
             "target_modules": "lora_target_modules", 
             "gradient_checkpointing": "lora_gradient_checkpointing",
             "auto_r_ratio": "lora_auto_r_ratio",
@@ -1335,14 +1354,21 @@ class LoRAConfigBuilder:
         last_n: Optional[int] = None,
         allow_depthwise: bool = False,
         kernels: Optional[List[int]] = None,
+        skip_stem: bool = False,
+        min_channels: int = 0,
         **kwargs,
     ) -> List[str]:
-        """
-        Intelligently detects target layers for LoRA injection.
+        """Intelligently detect target layers for LoRA injection.
+
+        Extra knobs for better capacity allocation:
+          skip_stem:     if True, exclude the first 3 top-level layers
+                         (typical backbone stem). Stem rarely benefits from
+                         LoRA in transfer learning.
+          min_channels:  if >0, skip layers whose min(in, out) < min_channels.
+                         Useful to avoid full-rank reparameterization on
+                         narrow layers when using a large base rank.
         """
         targets: Set[str] = set()
-        # LOGGER.info(f"DEBUG: auto_detect running with r={r}")
-        
         exclude_set = set(exclude_modules) if exclude_modules else set()
         allowed_kernels = set(kernels) if kernels else None
 
@@ -1378,11 +1404,28 @@ class LoRAConfigBuilder:
                     if not (start_idx <= idx < end_idx):
                         continue
 
+            # 1b. Skip stem (first three top-level backbone layers).
+            # Stem is low-level, rarely benefits from LoRA in transfer learning,
+            # and wastes adapter capacity.
+            if skip_stem:
+                idx = LoRAConfigBuilder._get_layer_index(name)
+                if 0 <= idx <= 2:
+                    continue
+
             # 2. Type Filtering (Must be Conv2d or Linear)
             is_conv = isinstance(module, nn.Conv2d)
             is_linear = isinstance(module, nn.Linear)
             if not (is_conv or is_linear):
                 continue
+
+            # 2b. Min-channel filter: avoid attaching LoRA to very narrow layers
+            # where the requested rank would exceed capacity.
+            if min_channels > 0 and is_conv:
+                if min(module.in_channels, module.out_channels) < min_channels:
+                    continue
+            if min_channels > 0 and is_linear:
+                if min(module.in_features, module.out_features) < min_channels:
+                    continue
 
             # 3. Backbone Filtering
             if only_backbone and LoRAConfigBuilder._PAT_BACKBONE_EXCLUDE.search(name):
@@ -1861,6 +1904,8 @@ def apply_lora(
         "to_layer": config.to_layer,
         "allow_depthwise": config.allow_depthwise,
         "kernels": config.kernels,
+        "skip_stem": getattr(config, "skip_stem", False),
+        "min_channels": getattr(config, "min_channels", 0),
         "target_modules": config.target_modules, # This might be ['conv']
         "gradient_checkpointing": config.gradient_checkpointing,
         "auto_r_ratio": config.auto_r_ratio,

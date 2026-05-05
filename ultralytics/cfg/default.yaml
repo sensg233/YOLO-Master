@@ -166,6 +166,8 @@ lora_from_layer: # (int, optional) Start applying from layer index
 lora_to_layer: # (int, optional) Stop applying at layer index
 lora_allow_depthwise: False # (bool) Allow depthwise convolution
 lora_kernels: # (list[int], optional) Filter by kernel size
+lora_skip_stem: False # (bool) Skip the first three top-level backbone layers (stem); recommended for transfer learning
+lora_min_channels: 0 # (int) Skip layers whose min(in_channels, out_channels) < this value (0 disables; try 32 to keep LoRA genuinely low-rank)
 lora_gradient_checkpointing: True # (bool) Enable gradient checkpointing for LoRA memory optimization
 lora_lr_mult: 2.0 # (float) Learning rate multiplier for LoRA params vs base (2.0 recommended)
 lora_target_r: 8 # (int) AdaLoRA target rank after allocation
