@@ -2013,8 +2013,12 @@ def apply_lora(
         config.lr_mult = max(config.lr_mult, 3.0)
         LOGGER.info(f"[LoRA]   Dropout={config.dropout}, LR mult={config.lr_mult}")
 
-    # Check if LoRA should be enabled
-    if config.r <= 0 and config.auto_r_ratio <= 0:
+    # Check if LoRA should be enabled.
+    # BOFT/OFT/HRA/IA3 use block_size or other params instead of rank r;
+    # they are valid even when r=0. OFT always falls back to block_size=32
+    # when config value is 0, so peft_type="oft" alone is sufficient.
+    _rankless_peft = str(config.peft_type).lower() in {"boft", "oft", "ia3", "hra"}
+    if config.r <= 0 and config.auto_r_ratio <= 0 and not _rankless_peft:
         LOGGER.info("[LoRA] Disabled (r=0).")
         return model
 
