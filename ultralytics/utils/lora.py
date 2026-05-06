@@ -1835,15 +1835,18 @@ class LoRAConfigBuilder:
             # dim (in_c * kH * kW) to be divisible by boft_block_size.
             # Narrow or 3x3 layers often break this, so we pre-filter targets
             # and auto-downgrade block_size when too many layers are dropped.
+            #
+            # IMPORTANT: common_kwargs["target_modules"] may be a regex string
+            # (after _build_peft_exact_target_regex). We must use the original
+            # `targets` list for divisibility checking, then rebuild the regex
+            # after filtering.
             boft_block_size = int(kwargs.get("boft_block_size", 2))
-            raw_targets = common_kwargs["target_modules"]
-            # raw_targets may already be a regex string after _build_peft_exact_target_regex.
-            # For the divisibility check we need the literal list; fall back to model scan.
-            modules_dict = dict(model.named_modules())
+            boft_target_list = targets  # always a list — before regex conversion
+            modules_dict_boft = dict(model.named_modules())
 
-            def _boft_layer_kdims(name: str):
+            def _boft_layer_kdims(name: str, _md=modules_dict_boft):
                 """Return (in_dim, kdim) for BOFT divisibility check; None if not applicable."""
-                mod = modules_dict.get(name)
+                mod = _md.get(name)
                 if mod is None:
                     return None
                 if isinstance(mod, nn.Conv2d):
@@ -1862,19 +1865,28 @@ class LoRAConfigBuilder:
                     return in_dim % bs == 0 and kdim % bs == 0
                 return in_dim % bs == 0  # Linear
 
-            def _find_compatible_block_size(targets, preferred_bs):
-                """Auto-downgrade block_size if >50% targets are incompatible."""
-                if not isinstance(targets, list) or not targets:
+            def _find_compatible_block_size(target_list, preferred_bs):
+                """Auto-downgrade block_size if too many targets are incompatible.
+
+                Strategy:
+                  - If >=50% targets work with preferred_bs, keep it (drop the rest).
+                  - Otherwise try smaller candidates: preferred_bs//2, 3, 2, 1.
+                    (3 is included because YOLO first-conv kdim=27 is divisible by 3
+                    but not by 2 or 4.)
+                """
+                if not target_list:
                     return preferred_bs
-                ok_count = sum(1 for t in targets if _boft_ok(t, preferred_bs))
-                total = len(targets)
+                ok_count = sum(1 for t in target_list if _boft_ok(t, preferred_bs))
+                total = len(target_list)
                 if ok_count >= total * 0.5:
                     return preferred_bs  # majority compatible, just filter outliers
-                # Try smaller block sizes in descending order
-                for candidate in [preferred_bs // 2, 2, 1]:
-                    if candidate < 1:
-                        continue
-                    c_ok = sum(1 for t in targets if _boft_ok(t, candidate))
+                # Try smaller block sizes in descending order.
+                # Include 3 because YOLO 3x3 Conv with in_c=3 → kdim=27 → only 1/3/9/27 work.
+                for candidate in sorted(
+                    {preferred_bs // 2, 3, 2, 1} - {preferred_bs, 0},
+                    reverse=True,
+                ):
+                    c_ok = sum(1 for t in target_list if _boft_ok(t, candidate))
                     if c_ok >= total * 0.5:
                         LOGGER.warning(
                             f"[LoRA] BOFT auto-downgraded boft_block_size "
@@ -1882,28 +1894,27 @@ class LoRAConfigBuilder:
                             f"layers compatible with {preferred_bs})."
                         )
                         return candidate
-                return 1  # ultimate fallback
+                return 1  # ultimate fallback — always works
 
-            boft_block_size = _find_compatible_block_size(raw_targets, boft_block_size)
+            boft_block_size = _find_compatible_block_size(boft_target_list, boft_block_size)
 
-            if isinstance(raw_targets, list):
-                filtered = [t for t in raw_targets if _boft_ok(t, boft_block_size)]
-                dropped = len(raw_targets) - len(filtered)
-                if dropped:
-                    LOGGER.warning(
-                        f"[LoRA] BOFT dropped {dropped} targets whose channels/kernel "
-                        f"are not divisible by boft_block_size={boft_block_size}."
-                    )
-                if not filtered:
-                    raise ValueError(
-                        f"BOFT: no target layer is compatible with "
-                        f"boft_block_size={boft_block_size}. Try boft_block_size=1."
-                    )
-                target_list = filtered
-            else:
-                target_list = raw_targets
+            # Filter incompatible targets using the original list
+            filtered = [t for t in boft_target_list if _boft_ok(t, boft_block_size)]
+            dropped = len(boft_target_list) - len(filtered)
+            if dropped:
+                LOGGER.warning(
+                    f"[LoRA] BOFT dropped {dropped} targets whose channels/kernel "
+                    f"are not divisible by boft_block_size={boft_block_size}."
+                )
+            if not filtered:
+                raise ValueError(
+                    f"BOFT: no target layer is compatible with "
+                    f"boft_block_size={boft_block_size}. Try boft_block_size=1."
+                )
+            # Rebuild regex from the filtered list (same format other PEFT types expect)
+            target_modules_final = _build_peft_exact_target_regex(filtered) or filtered
             return BOFTConfig(
-                target_modules=target_list,
+                target_modules=target_modules_final,
                 exclude_modules=common_kwargs.get("exclude_modules"),
                 boft_block_size=boft_block_size,
                 boft_block_num=int(kwargs.get("boft_block_num", 0)),
