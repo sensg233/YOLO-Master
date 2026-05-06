@@ -1141,7 +1141,7 @@ class LoRAConfig:
     oft_coft: bool = False           # OFT: use constrained (Cayley-Neumann) rotations
     oft_eps: float = 6e-5            # OFT: numerical eps
     oft_block_share: bool = False    # OFT: share rotation across blocks
-    boft_block_size: int = 4         # BOFT: butterfly block size
+    boft_block_size: int = 2         # BOFT: butterfly block size (must divide kernel dim; 2 for YOLO 3x3 Conv)
     boft_block_num: int = 0          # BOFT: number of butterfly blocks (0 = auto)
     boft_n_butterfly_factor: int = 2 # BOFT: butterfly factor (paper default)
 
@@ -1833,24 +1833,61 @@ class LoRAConfigBuilder:
             # BOFT: Butterfly OFT (block-butterfly Cayley rotations).
             # PEFT BOFT requires both Conv in_features AND its effective kernel
             # dim (in_c * kH * kW) to be divisible by boft_block_size.
-            # Narrow or 3x3 layers often break this, so we pre-filter targets.
-            boft_block_size = int(kwargs.get("boft_block_size", 4))
+            # Narrow or 3x3 layers often break this, so we pre-filter targets
+            # and auto-downgrade block_size when too many layers are dropped.
+            boft_block_size = int(kwargs.get("boft_block_size", 2))
             raw_targets = common_kwargs["target_modules"]
             # raw_targets may already be a regex string after _build_peft_exact_target_regex.
             # For the divisibility check we need the literal list; fall back to model scan.
             modules_dict = dict(model.named_modules())
-            def _boft_ok(name: str) -> bool:
+
+            def _boft_layer_kdims(name: str):
+                """Return (in_dim, kdim) for BOFT divisibility check; None if not applicable."""
                 mod = modules_dict.get(name)
                 if mod is None:
-                    return True  # unknown — let PEFT decide
+                    return None
                 if isinstance(mod, nn.Conv2d):
                     kdim = mod.in_channels * mod.kernel_size[0] * mod.kernel_size[1]
-                    return mod.in_channels % boft_block_size == 0 and kdim % boft_block_size == 0
+                    return (mod.in_channels, kdim)
                 if isinstance(mod, nn.Linear):
-                    return mod.in_features % boft_block_size == 0
-                return True
+                    return (mod.in_features, None)
+                return None
+
+            def _boft_ok(name: str, bs: int) -> bool:
+                dims = _boft_layer_kdims(name)
+                if dims is None:
+                    return True  # unknown — let PEFT decide
+                in_dim, kdim = dims
+                if kdim is not None:  # Conv2d
+                    return in_dim % bs == 0 and kdim % bs == 0
+                return in_dim % bs == 0  # Linear
+
+            def _find_compatible_block_size(targets, preferred_bs):
+                """Auto-downgrade block_size if >50% targets are incompatible."""
+                if not isinstance(targets, list) or not targets:
+                    return preferred_bs
+                ok_count = sum(1 for t in targets if _boft_ok(t, preferred_bs))
+                total = len(targets)
+                if ok_count >= total * 0.5:
+                    return preferred_bs  # majority compatible, just filter outliers
+                # Try smaller block sizes in descending order
+                for candidate in [preferred_bs // 2, 2, 1]:
+                    if candidate < 1:
+                        continue
+                    c_ok = sum(1 for t in targets if _boft_ok(t, candidate))
+                    if c_ok >= total * 0.5:
+                        LOGGER.warning(
+                            f"[LoRA] BOFT auto-downgraded boft_block_size "
+                            f"{preferred_bs} → {candidate} (only {ok_count}/{total} "
+                            f"layers compatible with {preferred_bs})."
+                        )
+                        return candidate
+                return 1  # ultimate fallback
+
+            boft_block_size = _find_compatible_block_size(raw_targets, boft_block_size)
+
             if isinstance(raw_targets, list):
-                filtered = [t for t in raw_targets if _boft_ok(t)]
+                filtered = [t for t in raw_targets if _boft_ok(t, boft_block_size)]
                 dropped = len(raw_targets) - len(filtered)
                 if dropped:
                     LOGGER.warning(
@@ -1860,7 +1897,7 @@ class LoRAConfigBuilder:
                 if not filtered:
                     raise ValueError(
                         f"BOFT: no target layer is compatible with "
-                        f"boft_block_size={boft_block_size}. Try boft_block_size=1 or 2."
+                        f"boft_block_size={boft_block_size}. Try boft_block_size=1."
                     )
                 target_list = filtered
             else:

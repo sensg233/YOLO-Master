@@ -185,7 +185,7 @@ lora_oft_block_size: 0 # (int) OFT block size (>0 overrides rank r)
 lora_oft_coft: False # (bool) OFT: use constrained Cayley-Neumann rotation
 lora_oft_eps: 6.0e-5 # (float) OFT numerical eps
 lora_oft_block_share: False # (bool) OFT: share rotation across blocks
-lora_boft_block_size: 4 # (int) BOFT butterfly block size
+lora_boft_block_size: 2 # (int) BOFT butterfly block size (must divide kernel dim; use 1/2 for YOLO 3x3 Conv)
 lora_boft_block_num: 0 # (int) BOFT number of blocks (0 = auto from block_size)
 lora_boft_n_butterfly_factor: 2 # (int) BOFT butterfly factor (paper default)
 lora_hra_apply_gs: False # (bool) HRA: apply Gram-Schmidt orthogonalization
