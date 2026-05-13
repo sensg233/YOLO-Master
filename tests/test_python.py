@@ -40,6 +40,15 @@ from ultralytics.utils.downloads import download
 from ultralytics.utils.torch_utils import TORCH_1_11, TORCH_1_13
 
 
+def make_stub_yolo():
+    """Create a lightweight YOLO instance without loading weights from disk or network."""
+    model = YOLO.__new__(YOLO)
+    model._check_is_pytorch_model = lambda: None
+    model.trainer = mock.Mock()
+    model.model = mock.Mock()
+    return model
+
+
 def test_model_forward():
     """Test the forward pass of the YOLO model."""
     model = YOLO(CFG)
@@ -68,8 +77,7 @@ def test_model_methods():
 
 def test_save_lora_only_uses_live_trainer_model(tmp_path):
     """Test that LoRA adapter export uses the live trainer model when available."""
-    model = YOLO(MODEL)
-    model.trainer = mock.Mock()
+    model = make_stub_yolo()
     model.trainer.model = mock.Mock(lora_enabled=True)
 
     with mock.patch("ultralytics.utils.lora.save_lora_adapters", return_value=True) as save_mock:
@@ -79,7 +87,7 @@ def test_save_lora_only_uses_live_trainer_model(tmp_path):
 
 def test_load_lora_delegates_to_adapter_loader(tmp_path):
     """Test that LoRA adapter loading is delegated to the shared utility."""
-    model = YOLO(MODEL)
+    model = make_stub_yolo()
 
     with mock.patch("ultralytics.utils.lora.load_lora_adapters", return_value=True) as load_mock:
         assert model.load_lora(tmp_path / "lora_adapter")
@@ -88,13 +96,49 @@ def test_load_lora_delegates_to_adapter_loader(tmp_path):
 
 def test_save_lora_only_supports_fallback_backend(tmp_path):
     """Test that fallback-backed adapters still use the shared save utility."""
-    model = YOLO(MODEL)
-    model.trainer = mock.Mock()
+    model = make_stub_yolo()
     model.trainer.model = mock.Mock(lora_enabled=True, lora_backend="fallback")
 
     with mock.patch("ultralytics.utils.lora.save_lora_adapters", return_value=True) as save_mock:
         assert model.save_lora_only(tmp_path / "fallback_adapter")
         save_mock.assert_called_once_with(model.trainer.model, tmp_path / "fallback_adapter")
+
+
+def test_merge_lora_weights_clears_peft_runtime_state():
+    """Test that PEFT merges remove stale LoRA runtime metadata."""
+    from ultralytics.utils import lora as lora_utils
+
+    class DummyModel:
+        pass
+
+    merged_base = object()
+    model = DummyModel()
+    model.model = mock.Mock()
+    model.model.merge_and_unload.return_value = merged_base
+    model.lora_enabled = True
+    model.lora_backend = "peft"
+    model.lora_variant = "ia3"
+    model.lora_include_head = False
+    model.lora_freeze_bn = True
+    model.lora_target_modules = ["0.conv"]
+    model.lora_runtime_metadata = {"effective_backend": "peft"}
+    model.use_gradient_checkpointing = True
+
+    with mock.patch.object(lora_utils, "_find_original_model_class", return_value=DummyModel):
+        assert lora_utils.merge_lora_weights(model)
+
+    assert model.model is merged_base
+    for attr in (
+        "lora_enabled",
+        "lora_backend",
+        "lora_variant",
+        "lora_include_head",
+        "lora_freeze_bn",
+        "lora_target_modules",
+        "lora_runtime_metadata",
+        "use_gradient_checkpointing",
+    ):
+        assert not hasattr(model, attr)
 
 
 def test_model_profile():

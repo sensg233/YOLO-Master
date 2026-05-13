@@ -1025,6 +1025,27 @@ def _merge_fallback_modules(module: nn.Module) -> int:
     return merged
 
 
+def _clear_lora_runtime_state(model: "DetectionModel") -> None:
+    """Remove LoRA runtime markers after merge so the model no longer looks adapter-enabled."""
+    for attr in (
+        "lora_enabled",
+        "lora_config",
+        "lora_backend",
+        "lora_variant",
+        "lora_include_head",
+        "lora_freeze_bn",
+        "lora_target_modules",
+        "lora_runtime_metadata",
+        "lora_original_class",
+        "use_gradient_checkpointing",
+    ):
+        if hasattr(model, attr):
+            try:
+                delattr(model, attr)
+            except AttributeError:
+                pass
+
+
 # ============================================================================
 # 1. Enhanced Proxy Class
 # ============================================================================
@@ -2844,20 +2865,7 @@ def merge_lora_weights(model: "DetectionModel") -> bool:
             if original_cls is not None:
                 model.__class__ = original_cls
 
-            for attr in (
-                "lora_enabled",
-                "lora_config",
-                "lora_backend",
-                "lora_variant",
-                "lora_include_head",
-                "lora_runtime_metadata",
-                "lora_original_class",
-            ):
-                if hasattr(model, attr):
-                    try:
-                        delattr(model, attr)
-                    except AttributeError:
-                        pass
+            _clear_lora_runtime_state(model)
 
             LOGGER.info(f"[LoRA] ✅ Fallback merge completed. Merged {merged_count} manual LoRA modules.")
             return True
@@ -2884,12 +2892,7 @@ def merge_lora_weights(model: "DetectionModel") -> bool:
         model.__class__ = original_cls
         
         # Clear flags
-        for attr in ('lora_enabled', 'lora_config', 'use_gradient_checkpointing'):
-            if hasattr(model, attr):
-                try:
-                    delattr(model, attr)
-                except AttributeError:
-                    pass
+        _clear_lora_runtime_state(model)
             
         LOGGER.info(f"[LoRA] ✅ Merge completed. Model restored to {original_cls.__name__} architecture.")
         return True
