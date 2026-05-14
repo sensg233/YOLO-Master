@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "name": "lora_diagnose_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.lora.diagnose",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "task": "detect"
+        },
+        "params": {
+          "svd_sample_ratio": 0.2,
+          "svd_max_layers": 4,
+          "spectrum_max_layers": 4,
+          "spectrum_topk": 4
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "usage.tokens",
+          "cost_estimate"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

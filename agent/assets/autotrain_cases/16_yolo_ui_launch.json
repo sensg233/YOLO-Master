@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "name": "ui_launch_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.ui.launch",
+        "inputs": {
+          "mode": "gradio"
+        },
+        "params": {},
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

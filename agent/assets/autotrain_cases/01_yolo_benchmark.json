@@ -1,0 +1,35 @@
+{
+  "cases": [
+    {
+      "name": "benchmark_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.benchmark",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "data": "coco8.yaml"
+        },
+        "params": {
+          "imgsz": 32,
+          "device": "cpu"
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "environment.devices.selected",
+          "environment.devices.selection_source"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "cases": [
+    {
+      "name": "track_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.track",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "source": "ultralytics/assets/bus.jpg"
+        },
+        "params": {
+          "imgsz": 32,
+          "conf": 0.25
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "plan.inputs.source",
+          "auto_completed.device"
+        ],
+        "equals": {
+          "plan.target": "yolo",
+          "environment.references.source.exists": true
+        },
+        "contains": {
+          "plan.params.cmd": "track"
+        },
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

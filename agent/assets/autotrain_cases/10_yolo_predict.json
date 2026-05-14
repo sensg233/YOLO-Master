@@ -1,0 +1,136 @@
+{
+  "cases": [
+    {
+      "name": "predict_local_pt",
+      "suite": "deep-smoke",
+      "request": {
+        "skill": "yolo.predict",
+        "inputs": {
+          "model": "scripts/peft_validation/yolo11n.pt",
+          "source": "ultralytics/assets/bus.jpg"
+        },
+        "params": {
+          "imgsz": 64,
+          "device": "cpu",
+          "save": false,
+          "max_items": 1
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": false
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "nonempty": [
+          "results"
+        ],
+        "paths": [
+          "results.0.path",
+          "job.save_dir",
+          "logs.cmd.0"
+        ],
+        "path_exists": [
+          "manifest",
+          "job.save_dir"
+        ]
+      }
+    },
+    {
+      "name": "predict_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.predict",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "source": "ultralytics/assets/bus.jpg"
+        },
+        "params": {
+          "imgsz": 32,
+          "conf": 0.25
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "environment.devices.selected",
+          "auto_completed.device"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    },
+    {
+      "name": "predict_source_param_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.predict",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml"
+        },
+        "params": {
+          "source": "ultralytics/assets/bus.jpg",
+          "imgsz": 32,
+          "max_items": 1
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "plan.inputs.source",
+          "auto_completed.device"
+        ],
+        "equals": {
+          "environment.references.source.exists": true
+        },
+        "contains": {
+          "plan.params.cmd": "source="
+        },
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    },
+    {
+      "name": "predict_missing_source_error",
+      "suite": "contract",
+      "request": {
+        "skill": "yolo.predict",
+        "inputs": {
+          "model": "scripts/peft_validation/yolo11n.pt"
+        },
+        "params": {},
+        "artifacts": {},
+        "policy": {
+          "dry_run": false
+        }
+      },
+      "expect": {
+        "status": "failed",
+        "returncode": 1,
+        "paths": [
+          "error.type"
+        ],
+        "nonempty": [
+          "error.traceback"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,130 @@
+{
+  "cases": [
+    {
+      "name": "system_install_dry_run",
+      "suite": "fast-smoke",
+      "request": {
+        "skill": "yolo.system",
+        "action": "install",
+        "inputs": {},
+        "params": {},
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "plan.params.cmd.0"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    },
+    {
+      "name": "system_version",
+      "suite": "cli-smoke",
+      "request": {
+        "skill": "yolo.system",
+        "action": "version",
+        "inputs": {},
+        "params": {},
+        "artifacts": {},
+        "policy": {
+          "dry_run": false
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "data.version"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    },
+    {
+      "name": "system_cfg",
+      "suite": "cli-smoke",
+      "request": {
+        "skill": "yolo.system",
+        "action": "cfg.get",
+        "inputs": {},
+        "params": {},
+        "artifacts": {},
+        "policy": {
+          "dry_run": false
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "data.cfg"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    },
+    {
+      "name": "system_cfg_copy",
+      "suite": "cli-smoke",
+      "request": {
+        "skill": "yolo.system",
+        "action": "cfg.copy",
+        "inputs": {},
+        "params": {},
+        "artifacts": {},
+        "policy": {
+          "dry_run": false
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "artifacts.0.path"
+        ],
+        "path_exists": [
+          "manifest",
+          "artifacts.0.path"
+        ]
+      }
+    },
+    {
+      "name": "system_doctor",
+      "suite": "cli-smoke",
+      "request": {
+        "skill": "yolo.system",
+        "action": "doctor",
+        "inputs": {},
+        "params": {},
+        "artifacts": {},
+        "policy": {
+          "dry_run": false
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "equals": {
+          "data.environment.cli.available": true,
+          "data.environment.ultralytics.local_repo_active": true
+        },
+        "paths": [
+          "data.environment.devices.selected",
+          "data.environment.devices.selection_source",
+          "data.recommendations",
+          "data.environment.cli.path",
+          "environment.devices.available.0"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

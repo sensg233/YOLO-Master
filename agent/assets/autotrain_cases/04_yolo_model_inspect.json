@@ -1,0 +1,39 @@
+{
+  "cases": [
+    {
+      "name": "inspect_master_yaml",
+      "suite": "deep-smoke",
+      "request": {
+        "skill": "yolo.model.inspect",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml"
+        },
+        "params": {
+          "actions": [
+            "info",
+            "names",
+            "device",
+            "task_map"
+          ]
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": false
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "data.task",
+          "data.task_map"
+        ],
+        "nonempty": [
+          "data.names"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

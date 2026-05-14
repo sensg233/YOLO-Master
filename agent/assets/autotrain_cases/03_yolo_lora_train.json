@@ -1,0 +1,72 @@
+{
+  "cases": [
+    {
+      "name": "lora_train_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.lora.train",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "data": "coco8.yaml"
+        },
+        "params": {
+          "epochs": 1,
+          "imgsz": 32,
+          "batch": 1,
+          "lora_r": 8,
+          "lora_alpha": 16,
+          "lora_type": "lora"
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    },
+    {
+      "name": "lora_train_ia3_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.lora.train",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "data": "coco8.yaml"
+        },
+        "params": {
+          "epochs": 1,
+          "imgsz": 32,
+          "batch": 1,
+          "lora_type": "ia3"
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "auto_completed.device"
+        ],
+        "contains": {
+          "plan.params.cmd": "lora_type=ia3"
+        },
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

@@ -19,7 +19,8 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 DISPATCHER = SKILL_ROOT / "scripts" / "run_yolo_master_skill.py"
-DEFAULT_CASES = SKILL_ROOT / "assets" / "autotrain_cases.json"
+DEFAULT_CASES = SKILL_ROOT / "assets" / "autotrain_cases"
+LEGACY_CASES = SKILL_ROOT / "assets" / "autotrain_cases.json"
 REPORT_DIR = SKILL_ROOT / "logs"
 SUITE_ALIASES = {
     "quick": {"fast-smoke", "dry-run", "contract"},
@@ -44,6 +45,28 @@ def dotted_get(value: Any, path: str) -> Any:
             return None
         current = current[part]
     return current
+
+
+def load_cases(path: str | Path) -> list[dict[str, Any]]:
+    source = Path(path)
+    if source.is_dir():
+        cases: list[dict[str, Any]] = []
+        for file in sorted(source.glob("*.json")):
+            data = json.loads(file.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data = data.get("cases", [])
+            if not isinstance(data, list):
+                raise ValueError(f"Case file must contain a list or a {{'cases': [...]}} object: {file}")
+            cases.extend(data)
+        return cases
+    if not source.exists() and source == DEFAULT_CASES and LEGACY_CASES.exists():
+        source = LEGACY_CASES
+    data = json.loads(source.read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        data = data.get("cases", [])
+    if not isinstance(data, list):
+        raise ValueError(f"Case file must contain a list or a {{'cases': [...]}} object: {source}")
+    return data
 
 
 def load_dispatcher_module() -> Any:
@@ -585,10 +608,25 @@ def run_probe_case(case: dict[str, Any]) -> dict[str, Any]:
         def fake_build_model(request):
             return FakeModel()
 
-        def fake_call_openai_compatible(*, model, user_text, developer_text=None, image_url=None, image_detail="auto", base_url=None, api_mode="auto", max_output_tokens=800, temperature=None):
+        def fake_call_openai_compatible(
+            *,
+            model,
+            user_text,
+            developer_text=None,
+            image_url=None,
+            image_detail="auto",
+            base_url=None,
+            provider="openai",
+            api_key_env="OPENAI_API_KEY",
+            api_mode="auto",
+            max_output_tokens=800,
+            temperature=None,
+        ):
             calls.append(
                 {
                     "model": model,
+                    "provider": provider,
+                    "api_key_env": api_key_env,
                     "api_mode": api_mode,
                     "image_url": image_url,
                     "user_text": user_text,
@@ -717,7 +755,7 @@ def console_summary(report: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="AutoTrain-style validator for the YOLO-Master skill.")
-    parser.add_argument("--cases", default=str(DEFAULT_CASES), help="Path to autotrain case JSON.")
+    parser.add_argument("--cases", default=str(DEFAULT_CASES), help="Path to autotrain case JSON file or directory.")
     parser.add_argument(
         "--suite",
         default="quick",
@@ -736,7 +774,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
+    cases = load_cases(args.cases)
     selected = select_cases(cases, args.suite)
     results = [run_case(case) for case in selected]
     passed = sum(1 for r in results if r["passed"])

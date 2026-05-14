@@ -4,3 +4,113 @@ interface:
   default_prompt: "Use $yolo-master-agent to install Ultralytics, inspect the environment, and run YOLO train, val, predict, export, multimodal inference/evaluation, and recovery workflows with the `yolo` CLI first."
 policy:
   allow_implicit_invocation: true
+schema:
+  request:
+    type: object
+    required: [skill]
+    additionalProperties: true
+    properties:
+      skill:
+        type: string
+        enum:
+          - yolo.system
+          - yolo.model.inspect
+          - yolo.train
+          - yolo.lora.train
+          - yolo.val
+          - yolo.predict
+          - yolo.track
+          - yolo.multimodal.infer
+          - yolo.multimodal.evaluate
+          - yolo.export
+          - yolo.benchmark
+          - yolo.tune
+          - yolo.lora.adapters
+          - yolo.lora.diagnose
+          - yolo.eval.peft_compare
+          - yolo.moe.diagnose
+          - yolo.moe.prune
+          - yolo.solutions.run
+          - yolo.ui.launch
+          - yolo.pipeline.experiment
+      inputs:
+        type: object
+        additionalProperties: true
+        properties:
+          model:
+            type: string
+          task:
+            type: string
+          data:
+            type: string
+          source:
+            type: string
+          path:
+            type: string
+      params:
+        type: object
+        additionalProperties: true
+      runtime:
+        type: object
+        additionalProperties: true
+        properties:
+          executor:
+            type: string
+            enum: [cli, python_api, auto]
+          device:
+            type: [string, integer]
+          prefer_python_api:
+            type: boolean
+          allow_device_fallback:
+            type: boolean
+      artifacts:
+        type: object
+        additionalProperties: true
+        properties:
+          project:
+            type: string
+          name:
+            type: string
+      policy:
+        type: object
+        additionalProperties: true
+        properties:
+          dry_run:
+            type: boolean
+  response_envelope:
+    type: object
+    required: [skill, status, summary, usage, cost_estimate]
+    properties:
+      skill:
+        type: string
+      status:
+        type: string
+        enum: [ok, running, partial, blocked, failed]
+      summary:
+        type: string
+      usage:
+        type: object
+        required: [tokens, requests]
+        properties:
+          tokens:
+            type: object
+            required: [input, output, total]
+            properties:
+              input:
+                type: integer
+              output:
+                type: integer
+              total:
+                type: integer
+          requests:
+            type: integer
+      cost_estimate:
+        type: object
+        required: [currency, amount, basis]
+        properties:
+          currency:
+            type: string
+          amount:
+            type: [number, "null"]
+          basis:
+            type: string

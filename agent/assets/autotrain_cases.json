@@ -14,8 +14,14 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target", "plan.params.cmd.0"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target",
+        "plan.params.cmd.0"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -33,8 +39,12 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["data.version"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "data.version"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -52,8 +62,12 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["data.cfg"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "data.cfg"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -71,8 +85,13 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["artifacts.0.path"],
-      "path_exists": ["manifest", "artifacts.0.path"]
+      "paths": [
+        "artifacts.0.path"
+      ],
+      "path_exists": [
+        "manifest",
+        "artifacts.0.path"
+      ]
     }
   },
   {
@@ -101,7 +120,9 @@
         "data.environment.cli.path",
         "environment.devices.available.0"
       ],
-      "path_exists": ["manifest"]
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -113,7 +134,12 @@
         "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml"
       },
       "params": {
-        "actions": ["info", "names", "device", "task_map"]
+        "actions": [
+          "info",
+          "names",
+          "device",
+          "task_map"
+        ]
       },
       "artifacts": {},
       "policy": {
@@ -122,9 +148,16 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["data.task", "data.task_map"],
-      "nonempty": ["data.names"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "data.task",
+        "data.task_map"
+      ],
+      "nonempty": [
+        "data.names"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -149,9 +182,18 @@
     },
     "expect": {
       "status": "ok",
-      "nonempty": ["results"],
-      "paths": ["results.0.path", "job.save_dir", "logs.cmd.0"],
-      "path_exists": ["manifest", "job.save_dir"]
+      "nonempty": [
+        "results"
+      ],
+      "paths": [
+        "results.0.path",
+        "job.save_dir",
+        "logs.cmd.0"
+      ],
+      "path_exists": [
+        "manifest",
+        "job.save_dir"
+      ]
     }
   },
   {
@@ -183,8 +225,16 @@
       "equals": {
         "job.device": "mps"
       },
-      "paths": ["job.save_dir", "logs.cmd.0", "evaluation.map50_95", "evaluation.speed_ms.inference"],
-      "path_exists": ["manifest", "job.save_dir"]
+      "paths": [
+        "job.save_dir",
+        "logs.cmd.0",
+        "evaluation.map50_95",
+        "evaluation.speed_ms.inference"
+      ],
+      "path_exists": [
+        "manifest",
+        "job.save_dir"
+      ]
     }
   },
   {
@@ -214,8 +264,16 @@
       "equals": {
         "job.device": "mps"
       },
-      "paths": ["job.save_dir", "logs.cmd.0", "evaluation.map50_95", "evaluation.speed_ms.inference"],
-      "path_exists": ["manifest", "job.save_dir"]
+      "paths": [
+        "job.save_dir",
+        "logs.cmd.0",
+        "evaluation.map50_95",
+        "evaluation.speed_ms.inference"
+      ],
+      "path_exists": [
+        "manifest",
+        "job.save_dir"
+      ]
     }
   },
   {
@@ -238,8 +296,15 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target", "environment.devices.selected", "auto_completed.device"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target",
+        "environment.devices.selected",
+        "auto_completed.device"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -262,14 +327,21 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target", "plan.inputs.source", "auto_completed.device"],
+      "paths": [
+        "dry_run",
+        "plan.target",
+        "plan.inputs.source",
+        "auto_completed.device"
+      ],
       "equals": {
         "environment.references.source.exists": true
       },
       "contains": {
         "plan.params.cmd": "source="
       },
-      "path_exists": ["manifest"]
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -292,7 +364,12 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target", "plan.inputs.source", "auto_completed.device"],
+      "paths": [
+        "dry_run",
+        "plan.target",
+        "plan.inputs.source",
+        "auto_completed.device"
+      ],
       "equals": {
         "plan.target": "yolo",
         "environment.references.source.exists": true
@@ -300,7 +377,9 @@
       "contains": {
         "plan.params.cmd": "track"
       },
-      "path_exists": ["manifest"]
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -342,7 +421,9 @@
         "multimodal.method": "thinking-with-image",
         "multimodal.thinking_with_image": true
       },
-      "path_exists": ["manifest"]
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -385,7 +466,9 @@
         "multimodal.thinking_with_image": true,
         "multimodal.api_key_env": "OPENAI_API_KEY"
       },
-      "path_exists": ["manifest"]
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -423,7 +506,9 @@
         "plan.params.stages.1.model",
         "multimodal.vlm_model"
       ],
-      "path_exists": ["manifest"]
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -459,7 +544,9 @@
         "dry_run",
         "plan.params.stages.1.model"
       ],
-      "path_exists": ["manifest"]
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -499,7 +586,9 @@
         "dry_run",
         "plan.params.stages.1.prompt_template"
       ],
-      "path_exists": ["manifest"]
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -523,8 +612,15 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target", "environment.devices.selected", "auto_completed.device"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target",
+        "environment.devices.selected",
+        "auto_completed.device"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -547,8 +643,15 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target", "environment.devices.selected", "auto_completed.device"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target",
+        "environment.devices.selected",
+        "auto_completed.device"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -570,8 +673,15 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target", "environment.devices.selected", "environment.devices.selection_source"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target",
+        "environment.devices.selected",
+        "environment.devices.selection_source"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -594,8 +704,15 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target", "environment.devices.selected", "environment.devices.selection_source"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target",
+        "environment.devices.selected",
+        "environment.devices.selection_source"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -618,8 +735,13 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -646,8 +768,13 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -672,11 +799,17 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target", "auto_completed.device"],
+      "paths": [
+        "dry_run",
+        "plan.target",
+        "auto_completed.device"
+      ],
       "contains": {
         "plan.params.cmd": "lora_type=ia3"
       },
-      "path_exists": ["manifest"]
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -699,8 +832,13 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -722,8 +860,13 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -746,8 +889,13 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -766,8 +914,13 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -801,8 +954,13 @@
     },
     "expect": {
       "status": "ok",
-      "paths": ["dry_run", "plan.target"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "dry_run",
+        "plan.target"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -822,9 +980,15 @@
     "expect": {
       "status": "failed",
       "returncode": 1,
-      "paths": ["error.type"],
-      "nonempty": ["error.traceback"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "error.type"
+      ],
+      "nonempty": [
+        "error.traceback"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -850,7 +1014,12 @@
               {
                 "label": "bus",
                 "confidence": 0.9,
-                "xyxy": [10, 20, 100, 160]
+                "xyxy": [
+                  10,
+                  20,
+                  100,
+                  160
+                ]
               }
             ]
           }
@@ -864,14 +1033,21 @@
     "expect": {
       "status": "blocked",
       "returncode": 1,
-      "nonempty": ["results"],
+      "nonempty": [
+        "results"
+      ],
       "equals": {
         "multimodal.vlm.status": "blocked",
         "multimodal.provider.api_key_present": false,
         "multimodal.image.attached": false
       },
-      "paths": ["multimodal.vlm.summary", "multimodal.image.requested"],
-      "path_exists": ["manifest"]
+      "paths": [
+        "multimodal.vlm.summary",
+        "multimodal.image.requested"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   },
   {
@@ -901,7 +1077,12 @@
               {
                 "label": "bus",
                 "confidence": 0.9,
-                "xyxy": [10, 20, 100, 160]
+                "xyxy": [
+                  10,
+                  20,
+                  100,
+                  160
+                ]
               }
             ]
           }
@@ -942,7 +1123,12 @@
         "payload.multimodal.image.reasoning_input",
         "payload.multimodal.fusion.coco_predictions_preview"
       ],
-      "path_exists": ["payload.manifest", "payload.multimodal.image.marked.path", "payload.artifacts.0.path", "payload.artifacts.1.path"]
+      "path_exists": [
+        "payload.manifest",
+        "payload.multimodal.image.marked.path",
+        "payload.artifacts.0.path",
+        "payload.artifacts.1.path"
+      ]
     }
   },
   {
@@ -973,7 +1159,12 @@
               {
                 "label": "bus",
                 "confidence": 0.9,
-                "xyxy": [10, 20, 100, 160]
+                "xyxy": [
+                  10,
+                  20,
+                  100,
+                  160
+                ]
               }
             ]
           }
@@ -1004,7 +1195,10 @@
         "payload.multimodal.fusion.actions.0.type",
         "payload.multimodal.provider.base_url"
       ],
-      "path_exists": ["payload.manifest", "payload.multimodal.image.marked.path"]
+      "path_exists": [
+        "payload.manifest",
+        "payload.multimodal.image.marked.path"
+      ]
     }
   },
   {
@@ -1037,7 +1231,12 @@
               {
                 "label": "bus",
                 "confidence": 0.9,
-                "xyxy": [10, 20, 100, 160]
+                "xyxy": [
+                  10,
+                  20,
+                  100,
+                  160
+                ]
               }
             ]
           }
@@ -1127,7 +1326,13 @@
         "payload.results.0.metric_preview.yolo.map50",
         "payload.results.0.detector.summary.detections.0.label"
       ],
-      "path_exists": ["payload.manifest", "payload.artifacts.0.path", "payload.artifacts.1.path", "payload.artifacts.2.path", "payload.artifacts.3.path"]
+      "path_exists": [
+        "payload.manifest",
+        "payload.artifacts.0.path",
+        "payload.artifacts.1.path",
+        "payload.artifacts.2.path",
+        "payload.artifacts.3.path"
+      ]
     }
   },
   {
@@ -1183,6 +1388,94 @@
         "data.classification.category": "mps_runtime_error",
         "data.classification.device": "mps"
       }
+    }
+  },
+  {
+    "name": "lora_diagnose_dry_run",
+    "suite": "dry-run",
+    "request": {
+      "skill": "yolo.lora.diagnose",
+      "inputs": {
+        "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+        "task": "detect"
+      },
+      "params": {
+        "svd_sample_ratio": 0.2,
+        "svd_max_layers": 4,
+        "spectrum_max_layers": 4,
+        "spectrum_topk": 4
+      },
+      "artifacts": {},
+      "policy": {
+        "dry_run": true
+      }
+    },
+    "expect": {
+      "status": "ok",
+      "paths": [
+        "dry_run",
+        "plan.target",
+        "usage.tokens",
+        "cost_estimate"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
+    }
+  },
+  {
+    "name": "peft_compare_dry_run",
+    "suite": "dry-run",
+    "request": {
+      "skill": "yolo.eval.peft_compare",
+      "inputs": {
+        "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+        "task": "detect",
+        "data": "coco8.yaml"
+      },
+      "params": {
+        "train": {
+          "epochs": 1,
+          "imgsz": 32,
+          "batch": 1
+        },
+        "val": {
+          "imgsz": 32
+        },
+        "variants": [
+          {
+            "name": "full_sft",
+            "train": {
+              "lora_r": 0
+            }
+          },
+          {
+            "name": "lora_r8",
+            "train": {
+              "lora_type": "lora",
+              "lora_r": 8,
+              "lora_alpha": 16
+            }
+          }
+        ],
+        "rank_metric": "map50_95"
+      },
+      "artifacts": {},
+      "policy": {
+        "dry_run": true
+      }
+    },
+    "expect": {
+      "status": "ok",
+      "paths": [
+        "dry_run",
+        "plan.target",
+        "usage.tokens",
+        "cost_estimate"
+      ],
+      "path_exists": [
+        "manifest"
+      ]
     }
   }
 ]

@@ -1,0 +1,74 @@
+{
+  "cases": [
+    {
+      "name": "val_mini_mps_cli",
+      "suite": "extended-cli",
+      "manual_only": true,
+      "request": {
+        "skill": "yolo.val",
+        "inputs": {
+          "model": "scripts/peft_validation/yolo11n.pt",
+          "data": "agent/assets/mini-detect/mini_detect.yaml"
+        },
+        "params": {
+          "imgsz": 16,
+          "batch": 1,
+          "workers": 0,
+          "plots": false,
+          "verbose": false
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": false
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "equals": {
+          "job.device": "mps"
+        },
+        "paths": [
+          "job.save_dir",
+          "logs.cmd.0",
+          "evaluation.map50_95",
+          "evaluation.speed_ms.inference"
+        ],
+        "path_exists": [
+          "manifest",
+          "job.save_dir"
+        ]
+      }
+    },
+    {
+      "name": "val_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.val",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "data": "coco8.yaml"
+        },
+        "params": {
+          "imgsz": 32,
+          "batch": 1
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "environment.devices.selected",
+          "auto_completed.device"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

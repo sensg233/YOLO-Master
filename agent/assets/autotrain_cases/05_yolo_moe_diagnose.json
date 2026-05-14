@@ -1,0 +1,33 @@
+{
+  "cases": [
+    {
+      "name": "moe_diagnose_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.moe.diagnose",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "data": "coco8.yaml"
+        },
+        "params": {
+          "batch_size": 1,
+          "verbose": false
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

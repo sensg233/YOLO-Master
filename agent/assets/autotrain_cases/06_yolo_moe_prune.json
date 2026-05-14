@@ -1,0 +1,32 @@
+{
+  "cases": [
+    {
+      "name": "moe_prune_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.moe.prune",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "data": "coco8.yaml"
+        },
+        "params": {
+          "threshold": 0.15
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

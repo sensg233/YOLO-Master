@@ -1,0 +1,59 @@
+{
+  "cases": [
+    {
+      "name": "peft_compare_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.eval.peft_compare",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "task": "detect",
+          "data": "coco8.yaml"
+        },
+        "params": {
+          "train": {
+            "epochs": 1,
+            "imgsz": 32,
+            "batch": 1
+          },
+          "val": {
+            "imgsz": 32
+          },
+          "variants": [
+            {
+              "name": "full_sft",
+              "train": {
+                "lora_r": 0
+              }
+            },
+            {
+              "name": "lora_r8",
+              "train": {
+                "lora_type": "lora",
+                "lora_r": 8,
+                "lora_alpha": 16
+              }
+            }
+          ],
+          "rank_metric": "map50_95"
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "usage.tokens",
+          "cost_estimate"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

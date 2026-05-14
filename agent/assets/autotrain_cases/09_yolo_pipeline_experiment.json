@@ -1,0 +1,47 @@
+{
+  "cases": [
+    {
+      "name": "pipeline_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.pipeline.experiment",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "task": "detect",
+          "data": "coco8.yaml"
+        },
+        "params": {
+          "train": {
+            "epochs": 1,
+            "imgsz": 32,
+            "batch": 1
+          },
+          "val": {
+            "imgsz": 32
+          },
+          "export": {
+            "format": "onnx",
+            "imgsz": 32
+          }
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "pipeline.stage_order",
+          "usage.tokens",
+          "cost_estimate"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

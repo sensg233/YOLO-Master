@@ -1,0 +1,33 @@
+{
+  "cases": [
+    {
+      "name": "solutions_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.solutions.run",
+        "inputs": {
+          "solution": "count",
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "source": "ultralytics/assets/bus.jpg"
+        },
+        "params": {
+          "show": false
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

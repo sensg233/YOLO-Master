@@ -1,0 +1,34 @@
+{
+  "cases": [
+    {
+      "name": "export_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.export",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml"
+        },
+        "params": {
+          "format": "onnx",
+          "imgsz": 32
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "environment.devices.selected",
+          "environment.devices.selection_source"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}

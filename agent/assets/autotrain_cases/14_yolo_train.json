@@ -1,0 +1,132 @@
+{
+  "cases": [
+    {
+      "name": "train_mini_mps_cli",
+      "suite": "extended-cli",
+      "manual_only": true,
+      "request": {
+        "skill": "yolo.train",
+        "inputs": {
+          "model": "scripts/peft_validation/yolo11n.pt",
+          "data": "agent/assets/mini-detect/mini_detect.yaml"
+        },
+        "params": {
+          "imgsz": 64,
+          "epochs": 1,
+          "batch": 1,
+          "workers": 0,
+          "plots": false,
+          "verbose": false,
+          "patience": 1
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": false
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "equals": {
+          "job.device": "mps"
+        },
+        "paths": [
+          "job.save_dir",
+          "logs.cmd.0",
+          "evaluation.map50_95",
+          "evaluation.speed_ms.inference"
+        ],
+        "path_exists": [
+          "manifest",
+          "job.save_dir"
+        ]
+      }
+    },
+    {
+      "name": "train_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.train",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "data": "coco8.yaml"
+        },
+        "params": {
+          "epochs": 1,
+          "imgsz": 32,
+          "batch": 1
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "environment.devices.selected",
+          "auto_completed.device"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    },
+    {
+      "name": "recovery_auto_retry_probe",
+      "suite": "contract",
+      "executor": "probe",
+      "request": {
+        "skill": "yolo.train"
+      },
+      "probe": {
+        "kind": "recovery_auto_retry",
+        "skill": "yolo.train",
+        "mode": "train",
+        "device": "mps",
+        "selection_source": "auto",
+        "model": "m.pt"
+      },
+      "expect": {
+        "status": "ok",
+        "equals": {
+          "data.attempt_count": 2,
+          "data.final_device": "cpu",
+          "data.recovery.recovered": true,
+          "data.recovery.strategy": "device_fallback_to_cpu",
+          "data.recovery.to_device": "cpu",
+          "data.calls.1.2": "device=cpu"
+        },
+        "paths": [
+          "data.recovery.trigger.category",
+          "data.calls.0.2",
+          "data.calls.1.2"
+        ]
+      }
+    },
+    {
+      "name": "recovery_explicit_device_guard_probe",
+      "suite": "contract",
+      "executor": "probe",
+      "request": {
+        "skill": "yolo.train"
+      },
+      "probe": {
+        "kind": "recovery_no_retry",
+        "skill": "yolo.train",
+        "mode": "train",
+        "device": "mps",
+        "selection_source": "runtime"
+      },
+      "expect": {
+        "status": "ok",
+        "equals": {
+          "data.should_retry": false,
+          "data.classification.category": "mps_runtime_error",
+          "data.classification.device": "mps"
+        }
+      }
+    }
+  ]
+}
