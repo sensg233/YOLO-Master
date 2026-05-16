@@ -65,7 +65,7 @@ lora_adapter_dir: "lora_adapter" # (str) Directory name for adapters
 lora_auto_r_ratio: 0.0 # (float) Auto calculate LoRA rank based on params ratio
 lora_use_dora: False # (bool) Enable DoRA (Weight-Decomposed Low-Rank Adaptation)
 lora_use_rslora: True # (bool) Enable RS-LoRA scaling for better high-rank stability
-lora_init_lora_weights: "pissa" # (str) LoRA init mode: "default", "gaussian", "pissa", "olora"
+lora_init_lora_weights: "gaussian" # (str) LoRA init mode: True/"default"=Kaiming, "gaussian", "olora"; "pissa"/"olora" require Linear layers only
 lora_type: "lora" # (str) PEFT type: "lora", "loha", "lokr"
 lora_quantization: "none" # (str) Quantization type: "none", "4bit", "8bit" (Requires bitsandbytes)
 lora_include_moe: False # (bool) Include MoE layers in auto-detection
