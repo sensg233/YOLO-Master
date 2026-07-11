@@ -114,15 +114,10 @@ def test_c2fmoa_aux_loss_not_double_counted_for_nested_blocks():
 
 
 def test_flash_attn_supports_sdpa_without_scale_keyword(monkeypatch):
-    from ultralytics.nn.modules.moa.moa import _sdpa_supports_scale
-    _sdpa_supports_scale.cache_clear()  # clear lru_cache so monkeypatch takes effect
-
     original_sdpa = F.scaled_dot_product_attention
 
-    def torch20_sdpa(q, k, v, *args, **kwargs):
-        # PyTorch < 2.0 sdpa does not accept scale= kwarg; discard it
-        kwargs.pop("scale", None)
-        return original_sdpa(q, k, v, *args, **kwargs)
+    def torch20_sdpa(q, k, v):
+        return original_sdpa(q, k, v)
 
     monkeypatch.setattr("ultralytics.nn.modules.moa.moa.F.scaled_dot_product_attention", torch20_sdpa)
     q = torch.randn(1, 2, 4, 4)
@@ -132,7 +127,6 @@ def test_flash_attn_supports_sdpa_without_scale_keyword(monkeypatch):
     out = _flash_attn(q, k, v, scale=scale)
     expected = ((q @ k.transpose(-2, -1)) * scale).softmax(dim=-1) @ v
     assert torch.allclose(out, expected)
-    _sdpa_supports_scale.cache_clear()  # restore for subsequent tests
 
 
 def test_moa_aux_loss_collected_for_c2f_and_neck():

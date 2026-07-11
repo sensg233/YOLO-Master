@@ -20,13 +20,15 @@ def test_mixture_aux_loss_uses_ema_scales():
 
     loss1 = _collect_mixture_aux_loss(model, torch.device("cpu"))
     assert loss1.requires_grad and torch.isfinite(loss1)
-    assert hasattr(model, "_mixture_loss_ema")
+    # EMA state is now a persistent buffer (_mixture_loss_ema_buf, shape [3])
+    # rather than a plain dict attribute, so it survives state_dict() round-trips.
+    assert hasattr(model, "_mixture_loss_ema_buf")
 
     loss2 = _collect_mixture_aux_loss(model, torch.device("cpu"))
     assert torch.isfinite(loss2)
     # EMA scales should stay positive and stable across steps
-    ema = model._mixture_loss_ema
-    assert all(v >= 1e-4 for v in ema.values())
+    ema_buf = model._mixture_loss_ema_buf
+    assert all(float(ema_buf[i]) >= 1e-4 for i in range(ema_buf.numel()))
 
 
 def test_moa_linear_attn_fp16_stable():

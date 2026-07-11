@@ -68,36 +68,64 @@ def _collect_moa_aux_loss(model: nn.Module | None, device: torch.device) -> torc
 _MIXTURE_LOSS_EMA_DECAY = 0.99
 _MIXTURE_LOSS_EMA_FLOOR = 1e-4
 _MIXTURE_LOSS_EMA_DEFAULTS = {"moe": 1.0, "mot": 0.1, "moa": 0.1}
+# Keys in fixed order for buffer indexing.
+_MIXTURE_LOSS_EMA_KEYS = ("moe", "mot", "moa")
 
 
 def _get_mixture_loss_ema(model: nn.Module | None) -> dict[str, float] | None:
-    """Return (and lazily init) EMA scales for MoE/MoT/MoA aux-loss magnitudes."""
+    """Return (and lazily init) EMA scales for MoE/MoT/MoA aux-loss magnitudes.
+
+    The EMA state is stored as a **persistent buffer** ``_mixture_loss_ema_buf``
+    (shape [3], float32) on the model so it survives ``state_dict()`` round-trips
+    and is correctly restored on resume.  Previously a plain dict attribute was
+    used, which silently reset to defaults after checkpoint resume.
+    """
     if model is None:
         return None
-    ema = getattr(model, "_mixture_loss_ema", None)
-    if ema is None:
-        ema = dict(_MIXTURE_LOSS_EMA_DEFAULTS)
-        model._mixture_loss_ema = ema
-    return ema
+    buf = getattr(model, "_mixture_loss_ema_buf", None)
+    if buf is None:
+        import torch as _torch
+        defaults = [_MIXTURE_LOSS_EMA_DEFAULTS[k] for k in _MIXTURE_LOSS_EMA_KEYS]
+        model.register_buffer(
+            "_mixture_loss_ema_buf",
+            _torch.tensor(defaults, dtype=_torch.float32),
+            persistent=True,
+        )
+        buf = model._mixture_loss_ema_buf
+    return {_MIXTURE_LOSS_EMA_KEYS[i]: float(buf[i]) for i in range(len(_MIXTURE_LOSS_EMA_KEYS))}
 
 
 def _update_mixture_loss_ema(model: nn.Module | None, key: str, loss_t: torch.Tensor) -> None:
     """Update one EMA entry from a detached scalar loss magnitude."""
-    ema = _get_mixture_loss_ema(model)
-    if ema is None or not getattr(model, "training", False):
+    if model is None or not getattr(model, "training", False):
         return
+    buf = getattr(model, "_mixture_loss_ema_buf", None)
+    if buf is None:
+        _get_mixture_loss_ema(model)          # lazy-init buffer
+        buf = model._mixture_loss_ema_buf
+    idx = _MIXTURE_LOSS_EMA_KEYS.index(key)
     with torch.no_grad():
         val = float(loss_t.detach().abs().reshape(-1)[0]) if loss_t.numel() else 0.0
         if val > _MIXTURE_LOSS_EMA_FLOOR:
-            ema[key] = _MIXTURE_LOSS_EMA_DECAY * ema[key] + (1.0 - _MIXTURE_LOSS_EMA_DECAY) * val
+            buf[idx] = _MIXTURE_LOSS_EMA_DECAY * buf[idx] + (1.0 - _MIXTURE_LOSS_EMA_DECAY) * val
 
 
-def _collect_mixture_aux_loss(model: nn.Module | None, device: torch.device) -> torch.Tensor:
-    """Collect all mixture-routing auxiliary losses that share the moe loss gain.
+def _collect_mixture_aux_loss(
+    model: nn.Module | None,
+    device: torch.device,
+    moe_gain: float = 1.0,
+    mot_gain: float = 1.0,
+    moa_gain: float = 1.0,
+) -> torch.Tensor:
+    """Collect all mixture-routing auxiliary losses with **independent** gains.
 
     Per-type EMA normalization prevents large-scale losses (e.g. MoE GShard ~1.0)
     from drowning out smaller-scale losses (e.g. MoA/MoT ~0.01-0.1) while keeping
     gradient ratios stable across batches (unlike per-step detached magnitudes).
+
+    Each loss type is scaled by its own gain (``moe_gain``, ``mot_gain``,
+    ``moa_gain``) before summation, so users can up-weight MoT routing
+    regularisation without inflating MoE balance loss, and vice versa.
     """
     moe_l = _collect_moe_aux_loss(model, device)
     mot_l = _collect_mot_aux_loss(model, device)
@@ -117,7 +145,7 @@ def _collect_mixture_aux_loss(model: nn.Module | None, device: torch.device) -> 
         mot_scale = mot_l.detach().clamp(min=_MIXTURE_LOSS_EMA_FLOOR)
         moa_scale = moa_l.detach().clamp(min=_MIXTURE_LOSS_EMA_FLOOR)
 
-    return (moe_l / moe_scale) + (mot_l / mot_scale) + (moa_l / moa_scale)
+    return (moe_l / moe_scale * moe_gain) + (mot_l / mot_scale * mot_gain) + (moa_l / moa_scale * moa_gain)
 
 
 class VarifocalLoss(nn.Module):
@@ -403,8 +431,14 @@ class v8DetectionLoss:
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
 
-        # Mixture-routing auxiliary loss (MoE + MoT)
-        loss[3] = _collect_mixture_aux_loss(getattr(self, "model", None), self.device) * self.hyp.moe
+        # Mixture-routing auxiliary loss (MoE + MoT + MoA) with independent gains
+        loss[3] = _collect_mixture_aux_loss(
+            getattr(self, "model", None),
+            self.device,
+            moe_gain=getattr(self.hyp, "moe_aux_gain", self.hyp.moe),
+            mot_gain=getattr(self.hyp, "mot_aux_gain", self.hyp.moe),
+            moa_gain=getattr(self.hyp, "moa_aux_gain", self.hyp.moe),
+        )
 
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl, mixture_aux)
 
@@ -670,8 +704,14 @@ class v8PoseLoss(v8DetectionLoss):
         loss[3] *= self.hyp.cls  # cls gain
         loss[4] *= self.hyp.dfl  # dfl gain
 
-        # Mixture-routing auxiliary loss (MoE + MoT)
-        loss[5] = _collect_mixture_aux_loss(getattr(self, "model", None), self.device) * self.hyp.moe
+        # Mixture-routing auxiliary loss (MoE + MoT + MoA) with independent gains
+        loss[5] = _collect_mixture_aux_loss(
+            getattr(self, "model", None),
+            self.device,
+            moe_gain=getattr(self.hyp, "moe_aux_gain", self.hyp.moe),
+            mot_gain=getattr(self.hyp, "mot_aux_gain", self.hyp.moe),
+            moa_gain=getattr(self.hyp, "moa_aux_gain", self.hyp.moe),
+        )
 
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 

@@ -16,6 +16,7 @@ from ultralytics.nn.modules.moe.scheduler import (
     MoEDynamicSchedulerConfig,
     MapSaturationScheduler,
     MapSaturationSchedulerConfig,
+    MapSaturationScheduleState,
     compute_gini,
 )
 
@@ -160,3 +161,66 @@ def test_map_saturation_state_dict_round_trip():
     assert restored.saturation_scale == pytest.approx(scheduler.saturation_scale)
     assert restored.map_history == scheduler.map_history
     assert restored.config.window_size == 3
+
+
+def test_map_saturation_config_validation():
+    with pytest.raises(ValueError, match="window_size must be > 0"):
+        MapSaturationSchedulerConfig(window_size=0)
+    with pytest.raises(ValueError, match="decay_factor must be in \\(0, 1\\)"):
+        MapSaturationSchedulerConfig(decay_factor=1.0)
+    with pytest.raises(ValueError, match="decay_factor must be in \\(0, 1\\)"):
+        MapSaturationSchedulerConfig(decay_factor=0.0)
+    with pytest.raises(ValueError, match="min_scale must be >= 0"):
+        MapSaturationSchedulerConfig(min_scale=-0.1)
+    with pytest.raises(ValueError, match="saturation_threshold must be >= 0"):
+        MapSaturationSchedulerConfig(saturation_threshold=-0.001)
+
+
+def test_moeloss_map_saturation_scheduler_apply():
+    torch.manual_seed(0)
+    logits = torch.tensor([[10.0, -10.0, -10.0, -10.0]]).repeat(8, 1).requires_grad_(True)
+    probs = torch.softmax(logits, dim=1)
+    indices = torch.zeros(8, 2, dtype=torch.long)
+    loss_fn = MoELoss(
+        num_experts=4,
+        top_k=2,
+        z_loss_coeff=0.0,
+        balance_loss_coeff=1.0,
+    )
+    # Inject a fake scheduler with scale=0.5
+    from ultralytics.nn.modules.moe.scheduler import MapSaturationScheduler, MapSaturationSchedulerConfig
+    loss_fn.map_saturation_scheduler = MapSaturationScheduler(MapSaturationSchedulerConfig(enabled=True))
+    loss_fn.map_saturation_scheduler.saturation_scale = 0.5
+    loss_fn.map_saturation_scheduler.last_state = MapSaturationScheduleState(
+        val_map=0.5, saturation_scale=0.5, plateau_detected=False
+    )
+
+    out = loss_fn(probs, logits, indices, return_dict=True)
+
+    # With base coeff=1.0 and scale=0.5, effective balance coeff should be 0.5
+    assert out["map_saturation_schedule"] is not None
+    assert out["map_saturation_schedule"]["saturation_scale"] == pytest.approx(0.5)
+    assert out["loss"].requires_grad
+
+
+def test_map_saturation_scheduler_disabled_passthrough_in_loss():
+    torch.manual_seed(0)
+    logits = torch.tensor([[10.0, -10.0, -10.0, -10.0]]).repeat(8, 1).requires_grad_(True)
+    probs = torch.softmax(logits, dim=1)
+    indices = torch.zeros(8, 2, dtype=torch.long)
+    loss_fn = MoELoss(
+        num_experts=4,
+        top_k=2,
+        z_loss_coeff=0.0,
+        balance_loss_coeff=2.0,
+    )
+    from ultralytics.nn.modules.moe.scheduler import MapSaturationScheduler, MapSaturationSchedulerConfig
+    loss_fn.map_saturation_scheduler = MapSaturationScheduler(MapSaturationSchedulerConfig(enabled=False))
+    loss_fn.map_saturation_scheduler.last_state = MapSaturationScheduleState(
+        val_map=0.5, saturation_scale=1.0, plateau_detected=False
+    )
+
+    out = loss_fn(probs, logits, indices, return_dict=True)
+    # disabled -> passthrough, balance coeff should remain 2.0
+    assert out["map_saturation_schedule"] is None or out["map_saturation_schedule"]["saturation_scale"] == 1.0
+

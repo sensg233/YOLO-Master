@@ -107,7 +107,6 @@ from ultralytics.nn.modules import (
     C2fMoA,
     C2fMoT,
 )
-from ultralytics.nn.modules.moe import is_experimental_moe, STABLE_MOE_CLASSES
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
@@ -350,12 +349,16 @@ class BaseModel(torch.nn.Module):
         if not self.is_fused():
             for m in self.model.modules():
                 if isinstance(m, (Conv, Conv2, DWConv)) and hasattr(m, "bn"):
+                    if not isinstance(m.conv, nn.Conv2d):
+                        continue  # Skip wrapped layers (e.g., MoLoRALayer)
                     if isinstance(m, Conv2):
                         m.fuse_convs()
                     m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                     delattr(m, "bn")  # remove batchnorm
                     m.forward = m.forward_fuse  # update forward
                 if isinstance(m, ConvTranspose) and hasattr(m, "bn"):
+                    if not isinstance(m.conv_transpose, nn.ConvTranspose2d):
+                        continue
                     m.conv_transpose = fuse_deconv_and_bn(m.conv_transpose, m.bn)
                     delattr(m, "bn")  # remove batchnorm
                     m.forward = m.forward_fuse  # update forward
@@ -1765,8 +1768,6 @@ def parse_model(d, ch, verbose=True):
             C2PSA,
             A2C2f,
             A2C2fMoE,
-            C2fMoA,
-            C2fMoT,
             WaveC2f,
             DyC2f,
             A3C2f,
@@ -1810,8 +1811,6 @@ def parse_model(d, ch, verbose=True):
                     args.extend((True, 1.2))
             if m is A2C2fMoE:
                 legacy = False
-            if m is C2fMoA or m is C2fMoT:
-                legacy = False
             if m is C2fCIB:
                 legacy = False
         elif m is AIFI:
@@ -1852,15 +1851,6 @@ def parse_model(d, ch, verbose=True):
             c2 = ch[f]
 
         m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
-
-        # Runtime guard: warn when EXPERIMENTAL MoE classes are used in YAML configs
-        _moe_cls_name = getattr(m, "__name__", "")
-        if _moe_cls_name and is_experimental_moe(_moe_cls_name):
-            LOGGER.warning(
-                f"{colorstr('yellow')}{_moe_cls_name} is EXPERIMENTAL — "
-                f"API may change; not recommended for production. "
-                f"Consider using STABLE MoE variants: {sorted(STABLE_MOE_CLASSES)}"
-            )
 
         # Inject MoE hyperparameters from global config into MoE modules
         # This bridges the gap between YAML config (moe_balance_loss, etc.)

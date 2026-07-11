@@ -130,6 +130,20 @@ class MapSaturationSchedulerConfig:
     decay_factor: float = 0.8
     min_scale: float = 0.1
 
+    def __post_init__(self):
+        if self.window_size <= 0:
+            raise ValueError(f"MapSaturationSchedulerConfig.window_size must be > 0, got {self.window_size}")
+        if not (0.0 < self.decay_factor < 1.0):
+            raise ValueError(
+                f"MapSaturationSchedulerConfig.decay_factor must be in (0, 1), got {self.decay_factor}"
+            )
+        if self.min_scale < 0.0:
+            raise ValueError(f"MapSaturationSchedulerConfig.min_scale must be >= 0, got {self.min_scale}")
+        if self.saturation_threshold < 0.0:
+            raise ValueError(
+                f"MapSaturationSchedulerConfig.saturation_threshold must be >= 0, got {self.saturation_threshold}"
+            )
+
 
 @dataclass
 class MapSaturationScheduleState:

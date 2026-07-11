@@ -82,28 +82,30 @@ def build_lora_command(model: Path, dataset: str, out_dir: Path, device: str, ba
     ]
 
 
-def shell_join(command: list[str]) -> str:
-    return " ".join(f'"{part}"' if " " in part else part for part in command)
-
-
 def compare_expert_signatures(
     reference: list[tuple[str, int, int]],
     candidate: list[tuple[str, int, int]],
 ) -> tuple[str, str]:
-    """Compare MoE expert signatures between a pruned model and a candidate.
+    """Compare MoE expert signatures between a reference and a candidate model.
 
-    Each entry is ``(layer_name, num_experts, top_k)``.
-    Returns ``("preserved", "")`` when structures match, otherwise
-    ``("structure_mismatch", note)`` with a human-readable note.
+    Each signature is a list of ``(layer_name, num_experts, top_k)`` tuples.
+    Returns ``(status, note)`` where status is ``"preserved"`` when all layers
+    match exactly, or ``"structure_mismatch"`` with a diagnostic note otherwise.
     """
-    ref_str = "/".join(f"{e}:{k}" for _, e, k in reference)
-    cand_str = "/".join(f"{e}:{k}" for _, e, k in candidate)
-    ref_counts = [(e, k) for _, e, k in reference]
-    cand_counts = [(e, k) for _, e, k in candidate]
-    if ref_counts == cand_counts:
-        return "preserved", ""
+    ref_str = "/".join(f"{n}:{k}" for _, n, k in reference)
+    cand_str = "/".join(f"{n}:{k}" for _, n, k in candidate)
+    ref_layers = {name: (n, k) for name, n, k in reference}
+    cand_layers = {name: (n, k) for name, n, k in candidate}
+
+    if ref_layers == cand_layers:
+        return ("preserved", "")
+
     note = f"reference={ref_str} candidate={cand_str}"
-    return "structure_mismatch", note
+    return ("structure_mismatch", note)
+
+
+def shell_join(command: list[str]) -> str:
+    return " ".join(f'"{part}"' if " " in part else part for part in command)
 
 
 def parse_args() -> argparse.Namespace:

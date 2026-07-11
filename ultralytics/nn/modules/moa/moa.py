@@ -8,7 +8,7 @@ Unlike MoE which routes *tokens to expert FFNs*, MoA routes tokens to
 *different attention heads with different receptive fields*. For dense
 prediction tasks (object detection), this provides:
 
-1. **Local heads** – depthwise-3×3-biased QKV, captures fine texture / edge detail
+1. **Local heads**  – depthwise-3×3-biased QKV, captures fine texture / edge detail
 2. **Regional heads** – pooled key/value (stride=2), mid-range context
 3. **Global heads** – linear attention (O(N) complexity), scene-level semantics
 
@@ -27,93 +27,37 @@ Implementation notes
 
 from __future__ import annotations
 
-import functools
-import inspect
 import math
 from typing import List, Optional, Tuple
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ultralytics.nn.modules.conv import Conv
 
-
-def all_reduce_mean(tensor: torch.Tensor) -> torch.Tensor:
-    """Average a tensor across DDP ranks (gradient-preserving, no-op on 1 GPU).
-
-    MoA DDP aux-loss sync: local, dependency-free copy of MoE's
-    ``moe.loss.all_reduce_mean`` — duplicated here (rather than imported)
-    so MoA keeps zero compile-time dependency on the MoE package (see the
-    ``get_safe_groups`` fix above for the same rationale). Reduces in
-    float32 to avoid precision loss when the model runs under fp16/bf16 AMP.
-    """
-    if not (dist.is_available() and dist.is_initialized()):
-        return tensor
-    world = dist.get_world_size()
-    if world <= 1:
-        return tensor
-    orig_dtype = tensor.dtype
-    out = tensor.float().clone()
-    dist.all_reduce(out, op=dist.ReduceOp.SUM)
-    out = out / world
-    return out.to(orig_dtype)
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-# import the shared, dependency-free helper directly from
-# `nn.modules.utils` instead of `nn.modules.moe.utils`. This removes MoA's
-# compile-time dependency on the MoE package so MoE-internal refactors can no
-# longer break MoA imports.
-from ultralytics.nn.modules.utils import get_safe_groups as _safe_groups
-
-# explicit __all__ restricts `from moa import *` to public symbols only,
-# preventing leakage of internal helpers (_flash_attn, _MoARouter, etc.).
-__all__ = (
-    "MoABlock",
-    "C2fMoA",
-    "NeckMoAFusion",
-    "anneal_moa_temperature",
-    "collect_moa_aux_loss",
-)
+from ultralytics.nn.modules.moe.utils import get_safe_groups as _safe_groups
 
 
 def _flash_attn(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                 scale: float) -> torch.Tensor:
-    """Scaled dot-product attention; uses F.sdpa when available (torch ≥ 2.0).
-
-    whether ``F.scaled_dot_product_attention`` accepts a ``scale``
-    keyword is now detected once via ``inspect.signature`` (cached on the
-    module) instead of catching ``TypeError`` and pattern-matching its
-    message string. Matching on exception text is fragile — a PyTorch
-    version bump that rewords the error message would silently defeat the
-    ``"scale" not in str(e)`` check and either re-raise a spurious error or
-    swallow an unrelated one.
-    """
+    """Scaled dot-product attention; uses F.sdpa when available (torch ≥ 2.0)."""
     if hasattr(F, "scaled_dot_product_attention"):
-        if _sdpa_supports_scale():
+        try:
             return F.scaled_dot_product_attention(q, k, v, scale=scale)
-        default_scale = q.shape[-1] ** -0.5
-        return F.scaled_dot_product_attention(q * (scale / default_scale), k, v)
+        except TypeError as e:
+            if "scale" not in str(e):
+                raise
+            default_scale = q.shape[-1] ** -0.5
+            return F.scaled_dot_product_attention(q * (scale / default_scale), k, v)
     # fallback
     attn = (q @ k.transpose(-2, -1)) * scale
     attn = attn.softmax(dim=-1)
     return attn @ v
-
-
-@functools.lru_cache(maxsize=1)
-def _sdpa_supports_scale() -> bool:
-    """Detect (once, cached) whether ``F.scaled_dot_product_attention`` has a ``scale`` kwarg."""
-    try:
-        return "scale" in inspect.signature(F.scaled_dot_product_attention).parameters
-    except (TypeError, ValueError):
-        # Some backends (e.g. compiled/JIT-wrapped builtins) don't expose an
-        # inspectable signature; PyTorch >= 2.1 always supports `scale`, so
-        # default to True rather than silently downgrading precision.
-        return True
 
 
 def _window_flash_attn(
@@ -127,14 +71,7 @@ def _window_flash_attn(
 ) -> torch.Tensor:
     """Window-partitioned SDPA on [B, nh, N, hd] tokens (O(N·win²) complexity)."""
     B, nh, n_tokens, hd = q.shape
-    # `assert` is stripped under `python -O` / some JIT export paths,
-    # which would silently let a mismatched N flow into `.view()` below and
-    # raise a much more confusing shape error deep inside `partition()`.
-    if n_tokens != height * width:
-        raise ValueError(
-            f"_window_flash_attn: n_tokens ({n_tokens}) must equal height*width "
-            f"({height}*{width}={height * width})"
-        )
+    assert n_tokens == height * width
     win = max(1, min(int(window_size), height, width))
 
     def to_spatial(t: torch.Tensor) -> torch.Tensor:
@@ -243,13 +180,20 @@ class _RegionalAttnHead(nn.Module):
         nh, hd = self.num_heads, self.head_dim
         inner = nh * hd
 
-        q = self.q_proj(x).flatten(2).view(B, nh, hd, H * W).transpose(2, 3)
-
-        kv = self.kv_pool(x)                                 # [B, 2*inner, H', W']
+        # Safety: AvgPool2d(pool_stride, pool_stride) on H<2 or W<2 collapses
+        # the spatial dim to 1×0 or 0×N, producing empty tensors downstream.
+        # Fall back to a 1×1 KV (identity pooling) when the feature map is too
+        # small for stride-2 downsampling.
+        if min(H, W) < self.pool_stride:
+            kv = self.kv_pool[1](x)                     # use conv only, skip pool
+        else:
+            kv = self.kv_pool(x)                        # [B, 2*inner, H', W']
         H2, W2 = kv.shape[2], kv.shape[3]
         k, v = kv.split(inner, dim=1)
         k = k.flatten(2).view(B, nh, hd, H2 * W2).transpose(2, 3)
         v = v.flatten(2).view(B, nh, hd, H2 * W2).transpose(2, 3)
+
+        q = self.q_proj(x).flatten(2).view(B, nh, hd, H * W).transpose(2, 3)
 
         out = _flash_attn(q, k, v, self.scale)               # [B, nh, N, hd]
         out = out.transpose(2, 3).reshape(B, inner, H, W)
@@ -263,8 +207,17 @@ class _GlobalAttnHead(nn.Module):
     (O(N²)) with an O(N) approximation via random Fourier features.
     Suitable for large spatial maps (e.g., P3 at stride 8).
 
-    Falls back to standard attention when N is small (N ≤ 256).
+    Falls back to standard attention when N is small (N ≤ 512).  The
+    threshold was raised from 256 to 512 to eliminate the discontinuity at
+    N=256/257 where the two attention modes produce visibly different outputs.
+    A linear-blend transition window [512−64, 512] smoothly interpolates
+    between exact and linear-attention so there is no abrupt mode switch.
     """
+
+    # Token count above which linear-attention approximation is used.
+    _LINEAR_ATTN_THRESHOLD: int = 512
+    # Width of the smooth transition window (avoids hard mode switch).
+    _BLEND_WINDOW: int = 64
 
     def __init__(self, dim: int, num_heads: int, head_dim: Optional[int] = None,
                  nb_features: int = 64, rf_seed: int = 0x5F3759DF):
@@ -347,8 +300,14 @@ class _GlobalAttnHead(nn.Module):
 
         q, k, v = to_heads(q), to_heads(k), to_heads(v)
 
-        if N <= 256:
+        if N <= self._LINEAR_ATTN_THRESHOLD:
             out = _flash_attn(q, k, v, self.scale)
+            # Smooth blend in the transition window to avoid discontinuity.
+            blend_start = self._LINEAR_ATTN_THRESHOLD - self._BLEND_WINDOW
+            if N > blend_start:
+                alpha = (N - blend_start) / self._BLEND_WINDOW
+                linear_out = self._linear_attn(q, k, v)
+                out = (1 - alpha) * out + alpha * linear_out
         else:
             out = self._linear_attn(q, k, v)
 
@@ -372,14 +331,10 @@ class _MoARouter(nn.Module):
         super().__init__()
         self.temperature = max(temperature, 0.1)
         hidden = max(dim // reduction, num_groups * 2)
-        # drop inplace=True — the router output feeds both the
-        # softmax weights and the aux-loss graph; in-place SiLU on an
-        # intermediate that autograd needs unmodified can silently corrupt
-        # gradients or raise under complex checkpoint/export scenarios.
         self.router = nn.Sequential(
             nn.Conv2d(dim, hidden, 1, bias=False),
             nn.GroupNorm(_safe_groups(hidden, 4), hidden),
-            nn.SiLU(inplace=False),
+            nn.SiLU(inplace=True),
             nn.Conv2d(hidden, num_groups, 1, bias=True),
         )
         # init: near-uniform routing
@@ -387,7 +342,11 @@ class _MoARouter(nn.Module):
         nn.init.zeros_(self.router[-1].bias)
 
     def forward(self, x: torch.Tensor, return_logits: bool = False) -> torch.Tensor:
-        temp = self.temperature if self.training else 1.0
+        # Use the (possibly annealed) temperature in both train and eval so
+        # that routing entropy stays consistent across modes.  Previously eval
+        # hardcoded temp=1.0, which could shift router distributions after
+        # annealing and destabilise MoA (no Top-K stable set).
+        temp = self.temperature
         logits = self.router(x) / temp           # [B, M, H, W]
         probs = F.softmax(logits, dim=1)
         if return_logits:
@@ -396,23 +355,10 @@ class _MoARouter(nn.Module):
 
 
 def _moa_router_aux_loss(weights: torch.Tensor, logits: torch.Tensor, coeff: float) -> torch.Tensor:
-    """GShard-scale MoA router regularization with a small z/entropy stabilizer.
-
-    ``importance`` (the per-group mean routing probability) is now
-    averaged across DDP ranks before computing the balance/entropy terms.
-    Previously each rank computed balance loss purely from its own local
-    batch; under DDP with per-rank data sharding, different ranks can see
-    different local routing distributions, so their balance-loss gradients
-    push the (shared, all-reduced-by-DDP-autograd) router weights in
-    inconsistent directions. Averaging ``importance`` first — mirroring
-    MoE's ``all_reduce_mean`` usage in ``differentiable_balance_loss`` —
-    makes all ranks optimise the same global balance target. No-op on a
-    single GPU / when distributed is not initialised.
-    """
+    """GShard-scale MoA router regularization with a small z/entropy stabilizer."""
     num_groups = weights.shape[1]
     importance = weights.float().mean(dim=(0, 2, 3))
     importance = importance / importance.sum().clamp_min(1e-6)
-    importance = all_reduce_mean(importance)
     balance_loss = num_groups * torch.sum(importance * importance)
     z_loss = torch.logsumexp(logits.float(), dim=1).pow(2).mean()
     entropy = -(importance * torch.log(importance.clamp_min(1e-6))).sum()
@@ -431,7 +377,7 @@ class MoABlock(nn.Module):
     """Mixture-of-Attention Block.
 
     Routes each spatial token softly over three attention head-groups:
-      - local (DW-biased, captures fine-grained detail)
+      - local  (DW-biased, captures fine-grained detail)
       - regional (stride-2 pooled KV, mid-range context)
       - global (linear attention, scene semantics)
 
@@ -442,14 +388,15 @@ class MoABlock(nn.Module):
         num_heads (int): Total attention heads, split equally over groups.
         mlp_ratio (float): FFN expansion ratio.
         temperature (float): Router softmax temperature. Starts at 1.0 and
-            can be annealed toward min_temp (default 0.3) via
-            ``anneal_moa_temperature`` — note this must be called from the
-            training loop; it is not hooked automatically.
+            is automatically annealed each epoch by the trainer's
+            ``_anneal_moa_mot_temperature`` callback (factor=0.97,
+            min_temp=0.3 by default). Override via CLI args
+            ``moa_mot_temperature_factor`` / ``moa_mot_min_temperature``.
         attn_drop (float): Dropout on attention output.
         shortcut (bool): Residual connection around the block.
 
     Shape:
-        - Input: [B, dim, H, W]
+        - Input:  [B, dim, H, W]
         - Output: [B, dim, H, W]
     """
 
@@ -466,34 +413,18 @@ class MoABlock(nn.Module):
         aux_loss_coeff: float = 0.01,
         block_index: int = 0,
         local_window_size: int = 7,
-        rf_seed: int | None = None,
-        sequential_heads: bool = False,
     ):
         super().__init__()
-        # replace `assert` (stripped under `-O`) with an explicit
-        # exception so a misconfigured YAML head-count fails loudly instead
-        # of silently producing wrong-shaped per-group heads at export time.
-        if num_heads % self.NUM_GROUPS != 0:
-            raise ValueError(
-                f"num_heads ({num_heads}) must be divisible by NUM_GROUPS ({self.NUM_GROUPS})"
-            )
+        assert num_heads % self.NUM_GROUPS == 0, (
+            f"num_heads ({num_heads}) must be divisible by NUM_GROUPS ({self.NUM_GROUPS})"
+        )
         self.shortcut = shortcut
-        # sequential head computation reduces peak memory from 3×
-        # single-head output to 1× + accumulator, at the cost of giving up
-        # any (theoretical) parallelism between heads. Useful for large
-        # spatial maps (e.g. P3 stride-8) under memory pressure.
-        self.sequential_heads = sequential_heads
         self.aux_loss_coeff = aux_loss_coeff
         head_dim = max(dim // num_heads, 16)
         heads_per_group = num_heads // self.NUM_GROUPS
 
         # Three attention head-groups (global head uses a per-block RF seed).
-        # Allow user-specified rf_seed for reproducibility control; fall back
-        # to deterministic per-block seed for checkpoint compatibility.
-        if rf_seed is not None:
-            global_rf_seed = rf_seed
-        else:
-            global_rf_seed = block_index * 7919 + 2 * 65537
+        global_rf_seed = block_index * 7919 + 2 * 65537
         self.local_head   = _LocalAttnHead(dim, heads_per_group, head_dim, window_size=local_window_size)
         self.region_head  = _RegionalAttnHead(dim, heads_per_group, head_dim)
         self.global_head  = _GlobalAttnHead(dim, heads_per_group, head_dim, rf_seed=global_rf_seed)
@@ -517,6 +448,7 @@ class MoABlock(nn.Module):
         )
         self.ls_ffn = nn.Parameter(torch.ones(dim, 1, 1) * 0.1)
         self.last_aux_loss: torch.Tensor = torch.zeros((), requires_grad=False)
+        self.last_routing_snapshot: dict = {}
 
         self._init_weights()
 
@@ -526,6 +458,22 @@ class MoABlock(nn.Module):
                 nn.init.trunc_normal_(m.weight, std=0.02)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+
+    # ── RoutedModule protocol ───────────────────────────────────────────
+    @property
+    def num_experts(self) -> int:
+        """Number of attention head-groups (local/regional/global)."""
+        return self.NUM_GROUPS
+
+    @property
+    def top_k(self) -> int:
+        """All groups always active (soft routing, dense mixture)."""
+        return self.NUM_GROUPS
+
+    @property
+    def aux_loss(self) -> torch.Tensor:
+        """Router auxiliary loss (balance regularizer). Zero outside training."""
+        return self.last_aux_loss
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
@@ -537,30 +485,35 @@ class MoABlock(nn.Module):
         else:
             self.last_aux_loss = x.new_zeros(())
 
+        # ── Routing snapshot (detached diagnostics) ──────────────────────
+        with torch.no_grad():
+            mean_w = weights.detach().float().mean(dim=(0, 2, 3))  # [3]
+            self.last_routing_snapshot = {
+                "num_experts": self.NUM_GROUPS,
+                "top_k": self.NUM_GROUPS,
+                "expert_usage": mean_w,
+                "mean_router_probs": mean_w,
+                "aux_loss": float(self.last_aux_loss.detach()),
+            }
+
         w_l = weights[:, 0:1]     # [B, 1, H, W]
         w_r = weights[:, 1:2]
         w_g = weights[:, 2:3]
 
         # ── Attention head outputs ────────────────────────────────────────
-        # when sequential_heads is enabled, compute and accumulate
-        # heads one at a time so peak memory is 1× single-head output +
-        # accumulator instead of 3× (all heads resident simultaneously).
-        if self.sequential_heads:
-            mixed = w_l * self.local_head(x)
-            mixed = mixed + w_r * self.region_head(x)
-            mixed = mixed + w_g * self.global_head(x)
-        else:
-            out_l = self.local_head(x)
-            out_r = self.region_head(x)
-            out_g = self.global_head(x)
-            mixed = w_l * out_l + w_r * out_r + w_g * out_g   # [B, C, H, W]
+        out_l = self.local_head(x)
+        out_r = self.region_head(x)
+        out_g = self.global_head(x)
+
+        # ── Soft mixture ─────────────────────────────────────────────────
+        mixed = w_l * out_l + w_r * out_r + w_g * out_g   # [B, C, H, W]
         mixed = self.attn_drop(self.fusion(mixed))
 
         # ── Residual + layer-scale ────────────────────────────────────────
         # `shortcut` controls *all* block-level residual paths consistently:
-        # True → pre-activation residual around both attention and FFN
-        # False → pure feed-forward transform (no residual anywhere), so the
-        # block fully replaces its input rather than refining it.
+        #   True  → pre-activation residual around both attention and FFN
+        #   False → pure feed-forward transform (no residual anywhere), so the
+        #           block fully replaces its input rather than refining it.
         if self.shortcut:
             x = x + self.ls_attn * mixed
             x = x + self.ls_ffn * self.ffn(x)
@@ -583,8 +536,8 @@ class C2fMoA(nn.Module):
 
     Architecture:
         cv1 (1×1 split)
-        ├── identity branch (c2 // 2 channels, pass-through)
-        └── n × MoABlock (c2 // 2 channels)
+        ├── identity branch  (c2 // 2 channels, pass-through)
+        └── n × MoABlock     (c2 // 2 channels)
         cv2 (1×1 fusion, (n+2) × c2//2 → c2)
 
     Args:
@@ -610,7 +563,6 @@ class C2fMoA(nn.Module):
         e: float = 0.5,
         aux_loss_coeff: float = 0.01,
         local_window_size: int = 7,
-        rf_seed: int | None = None,
     ):
         super().__init__()
         self.c = int(c2 * e)
@@ -633,11 +585,11 @@ class C2fMoA(nn.Module):
                      shortcut=shortcut,
                      aux_loss_coeff=aux_loss_coeff,
                      block_index=i,
-                     local_window_size=local_window_size,
-                     rf_seed=rf_seed)
+                     local_window_size=local_window_size)
             for i in range(n)
         )
         self.last_aux_loss: torch.Tensor = torch.zeros((), requires_grad=False)
+        self.last_routing_snapshot: dict = {}
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = list(self.cv1(x).chunk(2, dim=1))   # [identity, dynamic]
@@ -648,7 +600,37 @@ class C2fMoA(nn.Module):
             if isinstance(l, torch.Tensor):
                 aux_total = aux_total + l
         self.last_aux_loss = aux_total
+
+        # ── Routing snapshot (aggregated from child MoABlocks) ──────────
+        with torch.no_grad():
+            child_snaps = [getattr(m, "last_routing_snapshot", {}) for m in self.m]
+            if child_snaps:
+                usages = [s["expert_usage"] for s in child_snaps if "expert_usage" in s]
+                mean_usage = sum(usages) / len(usages) if usages else x.new_zeros(3)
+                self.last_routing_snapshot = {
+                    "num_experts": MoABlock.NUM_GROUPS,
+                    "top_k": MoABlock.NUM_GROUPS,
+                    "expert_usage": mean_usage,
+                    "mean_router_probs": mean_usage,
+                    "aux_loss": float(aux_total.detach()),
+                }
+            else:
+                self.last_routing_snapshot = {}
+
         return self.cv2(torch.cat(y, dim=1))
+
+    # ── RoutedModule protocol ───────────────────────────────────────────
+    @property
+    def num_experts(self) -> int:
+        return MoABlock.NUM_GROUPS
+
+    @property
+    def top_k(self) -> int:
+        return MoABlock.NUM_GROUPS
+
+    @property
+    def aux_loss(self) -> torch.Tensor:
+        return self.last_aux_loss
 
 
 # ---------------------------------------------------------------------------
@@ -674,8 +656,8 @@ class NeckMoAFusion(nn.Module):
         shortcut (bool): Residual path.
 
     Input:
-        hi : [B, c_hi, H, W] (fine-grained, e.g. P3 or P4)
-        lo : [B, c_lo, H/2, W/2] (semantic, e.g. P4 or P5 after upsample)
+        hi : [B, c_hi, H, W]        (fine-grained, e.g. P3 or P4)
+        lo : [B, c_lo, H/2, W/2]    (semantic, e.g. P4 or P5 after upsample)
 
     Output: [B, c_out, H, W]
     """
@@ -719,6 +701,7 @@ class NeckMoAFusion(nn.Module):
         self.res_proj = (nn.Conv2d(c_hi, c_out, 1, bias=False)
                          if c_hi != c_out else nn.Identity())
         self.last_aux_loss: torch.Tensor = torch.zeros((), requires_grad=False)
+        self.last_routing_snapshot: dict = {}
 
         self._init_weights()
 
@@ -763,21 +746,40 @@ class NeckMoAFusion(nn.Module):
         w_cross = weights[:, 0:1]
         w_self  = weights[:, 1:2]
 
-        # replace `assert` with an explicit exception — this is a
-        # user-configuration-dependent invariant (c_hi/num_heads/c_out
-        # combination), not a pure internal-logic sanity check, so it must
-        # still fire under `python -O`.
-        if self_out.shape[1] != cross_out.shape[1]:
-            raise RuntimeError(
-                f"NeckMoAFusion channel mismatch before blend: "
-                f"self_out C={self_out.shape[1]} vs cross_out C={cross_out.shape[1]}"
-            )
+        # ── Routing snapshot ─────────────────────────────────────────────
+        with torch.no_grad():
+            mean_w = weights.detach().float().mean(dim=(0, 2, 3))  # [2]
+            self.last_routing_snapshot = {
+                "num_experts": 2,
+                "top_k": 2,
+                "expert_usage": mean_w,
+                "mean_router_probs": mean_w,
+                "aux_loss": float(self.last_aux_loss.detach()),
+            }
+
+        assert self_out.shape[1] == cross_out.shape[1], (
+            f"NeckMoAFusion channel mismatch before blend: "
+            f"self_out C={self_out.shape[1]} vs cross_out C={cross_out.shape[1]}"
+        )
         out = w_cross * cross_out + w_self * self_out
 
         if self.shortcut:
             out = out + self.res_proj(hi)
 
         return out
+
+    # ── RoutedModule protocol ───────────────────────────────────────────
+    @property
+    def num_experts(self) -> int:
+        return 2
+
+    @property
+    def top_k(self) -> int:
+        return 2
+
+    @property
+    def aux_loss(self) -> torch.Tensor:
+        return self.last_aux_loss
 
 
 # ---------------------------------------------------------------------------

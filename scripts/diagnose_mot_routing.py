@@ -14,7 +14,6 @@ import csv
 import os
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/yolo_master_matplotlib")
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
@@ -171,6 +170,84 @@ def synthetic_scenes(imgsz: int, batch: int):
     scenes.append(("irregular_occluded", irregular.clamp(0, 1), [f"irregular_occluded_{i}" for i in range(batch)]))
 
     return scenes
+
+
+class RouterWeightSummary:
+    """Per-expert summary of router weights for a single MoT layer."""
+
+    __slots__ = ("layer", "expert", "expert_id", "active_tokens", "total_tokens", "activation_ratio", "mean_weight")
+
+    def __init__(self, layer: str, expert: str, expert_id: int, active_tokens: int, total_tokens: int, mean_weight: float):
+        self.layer = layer
+        self.expert = expert
+        self.expert_id = expert_id
+        self.active_tokens = active_tokens
+        self.total_tokens = total_tokens
+        self.activation_ratio = active_tokens / max(total_tokens, 1)
+        self.mean_weight = mean_weight
+
+    def __repr__(self) -> str:
+        return (
+            f"RouterWeightSummary(layer={self.layer!r}, expert={self.expert!r}, "
+            f"active_tokens={self.active_tokens}/{self.total_tokens}, "
+            f"activation_ratio={self.activation_ratio:.4f}, mean_weight={self.mean_weight:.6f})"
+        )
+
+
+def summarize_router_weights(layer_name: str, weights: torch.Tensor) -> list[RouterWeightSummary]:
+    """Summarize per-expert activation from a router weight tensor.
+
+    Args:
+        layer_name: Name of the MoT layer for labelling.
+        weights: Router weights of shape ``[B, E, H, W]`` (or ``[B, E, N]``).
+
+    Returns:
+        One :class:`RouterWeightSummary` per expert, in expert-index order.
+    """
+    if weights.ndim == 4:
+        B, E, H, W = weights.shape
+        flat = weights.permute(1, 0, 2, 3).reshape(E, -1)  # [E, B*H*W]
+    elif weights.ndim == 3:
+        B, E, N = weights.shape
+        flat = weights.permute(1, 0, 2).reshape(E, -1)
+    else:
+        raise ValueError(f"Expected weights with 3 or 4 dims, got {weights.ndim}")
+
+    total_tokens = flat.shape[1]
+    rows: list[RouterWeightSummary] = []
+    for e_idx in range(E):
+        expert_w = flat[e_idx]
+        active = int((expert_w > 0).sum().item())
+        mean_w = float(expert_w.mean().item())
+        expert_name = EXPERT_NAMES[e_idx] if e_idx < len(EXPERT_NAMES) else f"Expert{e_idx}"
+        rows.append(RouterWeightSummary(layer_name, expert_name, e_idx, active, total_tokens, mean_w))
+    return rows
+
+
+def scenario_recommendations(rows: list[RouterWeightSummary]) -> list[str]:
+    """Generate data-backed routing recommendations from weight summaries.
+
+    Returns one recommendation string per expert. Each string includes a
+    numeric metric so callers can verify the advice is grounded in data.
+    """
+    recs: list[str] = []
+    for row in rows:
+        if row.activation_ratio >= 0.75:
+            recs.append(
+                f"{row.expert}: dominant specialist (activation {row.activation_ratio:.1%}, "
+                f"mean_weight {row.mean_weight:.4f}) — retain at full capacity"
+            )
+        elif row.activation_ratio >= 0.25:
+            recs.append(
+                f"{row.expert}: active specialist (activation {row.activation_ratio:.1%}, "
+                f"mean_weight {row.mean_weight:.4f}) — consider rank reduction"
+            )
+        else:
+            recs.append(
+                f"{row.expert}: underutilised (activation {row.activation_ratio:.1%}, "
+                f"mean_weight {row.mean_weight:.4f}) — candidate for pruning"
+            )
+    return recs
 
 
 def aggregate_scenarios(records: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -340,54 +417,6 @@ def plot_heatmap(records: list[dict[str, str]], out_path: Path, value: str) -> N
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
-
-
-def summarize_router_weights(layer_name: str, weights: torch.Tensor) -> list[SimpleNamespace]:
-    """Summarize per-expert routing statistics for a single MoT layer.
-
-    Args:
-        layer_name: Name of the MoT layer.
-        weights: Router weights of shape ``[B, num_experts, H, W]``.
-
-    Returns one :class:`types.SimpleNamespace` per expert with fields:
-        ``expert``, ``active_tokens``, ``activation_ratio``, ``mean_weight``.
-    """
-    num_experts = weights.shape[1]
-    rows = []
-    for expert_id, expert_name in enumerate(EXPERT_NAMES):
-        expert_weights = weights[:, expert_id]  # [B, H, W]
-        threshold = 1e-6
-        active = (expert_weights.abs() > threshold).sum().item()
-        total = expert_weights.numel()
-        rows.append(
-            SimpleNamespace(
-                expert=expert_name,
-                active_tokens=active,
-                activation_ratio=active / total if total else 0.0,
-                mean_weight=float(expert_weights.mean().item()),
-            )
-        )
-    return rows
-
-
-def scenario_recommendations(rows: list[SimpleNamespace]) -> list[str]:
-    """Generate actionable recommendations based on expert activation patterns.
-
-    Each recommendation string includes the expert name and a numeric metric
-    so downstream tooling can parse them.
-    """
-    recs = []
-    for row in rows:
-        pct = row.activation_ratio * 100
-        if row.active_tokens == 0:
-            recs.append(f"{row.expert}: inactive (0% tokens) — consider pruning in this scenario")
-        elif pct < 10:
-            recs.append(f"{row.expert}: low activation ({pct:.1f}% tokens) — may underfit this scene type")
-        elif pct < 50:
-            recs.append(f"{row.expert}: moderate activation ({pct:.1f}% tokens) — balanced contribution")
-        else:
-            recs.append(f"{row.expert}: high activation ({pct:.1f}% tokens) — dominant expert for this scene")
-    return recs
 
 
 def parse_args() -> argparse.Namespace:
