@@ -412,17 +412,21 @@ class _MoARouter(nn.Module):
 
 
 def _moa_router_aux_loss(weights: torch.Tensor, logits: torch.Tensor, coeff: float) -> torch.Tensor:
-    """GShard-scale MoA regularization with exact DDP global-value/local-gradient semantics."""
+    """GShard-scale MoA regularization with exact DDP global-value/local-gradient semantics.
+
+    Uses moe.loss.all_reduce_mean (which handles NCCL CPU-tensor safety) for the
+    cross-rank synchronization of detached statistics, so this function never crashes
+    when router outputs land on CPU under a NCCL-backed DDP group.
+    """
+    from ultralytics.nn.modules.moe.loss import all_reduce_mean as _all_reduce_mean
     from ultralytics.nn.modules.moe.loss import should_reduce_ddp
 
     num_groups = weights.shape[1]
     local_sum = weights.float().sum(dim=(0, 2, 3))
     local_count = weights.new_tensor(float(weights.shape[0] * weights.shape[2] * weights.shape[3])).float()
     if should_reduce_ddp():
-        global_sum = local_sum.detach().clone()
-        global_count = local_count.detach().clone()
-        dist.all_reduce(global_sum, op=dist.ReduceOp.SUM)
-        dist.all_reduce(global_count, op=dist.ReduceOp.SUM)
+        global_sum = _all_reduce_mean(local_sum.detach().clone())
+        global_count = _all_reduce_mean(local_count.detach().clone())
         # DDP averages parameter gradients by world size. Scale the local Jacobian
         # by R/N while exposing the exact detached global value S/N.
         importance = global_sum / global_count.clamp_min(1.0)

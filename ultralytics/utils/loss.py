@@ -83,19 +83,22 @@ def _get_mixture_loss_ema(model: nn.Module | None) -> dict[str, float] | None:
     if model is None:
         return None
     buf = getattr(model, "_mixture_loss_ema_buf", None)
+    # Determine target device from model parameters so the buffer stays aligned
+    # with the model even after ``.to(device)`` calls.
+    parameter = next(model.parameters(), None)
+    target_device = parameter.device if parameter is not None else torch.device("cpu")
     if buf is None:
-        import torch as _torch
         defaults = [_MIXTURE_LOSS_EMA_DEFAULTS[k] for k in _MIXTURE_LOSS_EMA_KEYS]
-        # ``next(..., None)`` is safe for parameter-free modules and never
-        # coerces a Parameter tensor to bool (which raises in PyTorch).
-        parameter = next(model.parameters(), None)
-        _device = parameter.device if parameter is not None else _torch.device("cpu")
         model.register_buffer(
             "_mixture_loss_ema_buf",
-            _torch.tensor(defaults, dtype=_torch.float32, device=_device),
+            torch.tensor(defaults, dtype=torch.float32, device=target_device),
             persistent=True,
         )
         buf = model._mixture_loss_ema_buf
+    elif buf.device != target_device:
+        # Re-align buffer device if model was moved after lazy-init
+        # (e.g. CPU checkpoint resumed then moved to CUDA).
+        buf.data = buf.to(target_device)
     return {_MIXTURE_LOSS_EMA_KEYS[i]: float(buf[i]) for i in range(len(_MIXTURE_LOSS_EMA_KEYS))}
 
 
