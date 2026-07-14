@@ -1192,7 +1192,7 @@ class BaseTrainer:
             if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
                 self._clear_memory(threshold=0.5)  # prevent VRAM spike
                 self.metrics, self.fitness = self.validate()
-                validated = True
+                validated = self.fitness is not None
 
             # NaN recovery
             recovered = self._handle_nan_recovery(epoch)
@@ -1248,7 +1248,7 @@ class BaseTrainer:
 
     def _finalize_moe_map_saturation_epoch(self, *, recovered: bool, validated: bool) -> None:
         """Update mAP-driven MoE scheduling only for validated, accepted epochs."""
-        if recovered or not validated:
+        if recovered or not validated or self.fitness is None:
             return
         if not getattr(self, "_has_moe", False) or not getattr(self.args, "moe_map_saturation_enabled", False):
             return

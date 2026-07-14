@@ -165,17 +165,22 @@ def test_map_saturation_state_dict_round_trip():
 
 
 @pytest.mark.parametrize(
-    ("recovered", "validated", "expected_updates"),
-    [(True, True, 0), (False, False, 0), (False, True, 1)],
+    ("recovered", "validated", "fitness", "expected_updates"),
+    [
+        (True, True, 0.5, 0),
+        (False, False, 0.5, 0),
+        (False, True, None, 0),
+        (False, True, 0.5, 1),
+    ],
 )
-def test_map_saturation_updates_only_for_accepted_epoch(recovered, validated, expected_updates):
+def test_map_saturation_updates_only_for_accepted_epoch(recovered, validated, fitness, expected_updates):
     block = UltraOptimizedMoE(8, 8, num_experts=2, top_k=1, router_reduction=2, router_pool_scale=1, num_groups=1)
     block.map_saturation_scheduler = MapSaturationScheduler(MapSaturationSchedulerConfig(window_size=1))
     trainer = types.SimpleNamespace(
         _has_moe=True,
         args=types.SimpleNamespace(moe_map_saturation_enabled=True),
         model=torch.nn.Sequential(block),
-        fitness=0.5,
+        fitness=fitness,
     )
 
     BaseTrainer._finalize_moe_map_saturation_epoch(trainer, recovered=recovered, validated=validated)
