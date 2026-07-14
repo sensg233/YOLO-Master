@@ -53,7 +53,7 @@ from .experts_advanced import (
     FusedExpertGroup,
     LowRankFusedExpertGroup,
 )
-from .loss import MoELoss, gshard_balance_loss, weighted_gshard_balance_loss, differentiable_balance_loss, all_reduce_mean
+from .loss import MoELoss, gshard_balance_loss, weighted_gshard_balance_loss, differentiable_balance_loss, all_reduce_mean, should_reduce_ddp
 from ultralytics.nn.modules.block import ABlock, A2C2f, C3k
 
 __all__ = (
@@ -654,8 +654,8 @@ class HyperFusedMoE(nn.Module):
             dev = probs.device if isinstance(probs, torch.Tensor) else None
             usage = torch.full((self.num_experts,), 1.0 / self.num_experts, device=dev)
         if isinstance(probs, torch.Tensor):
-            return differentiable_balance_loss(probs, usage, self.num_experts, reduce_ddp=True)
-        return gshard_balance_loss(usage, self.num_experts, reduce_ddp=True)
+            return differentiable_balance_loss(probs, usage, self.num_experts, reduce_ddp=should_reduce_ddp(self))
+        return gshard_balance_loss(usage, self.num_experts, reduce_ddp=should_reduce_ddp(self))
 
     @property
     def aux_loss(self):

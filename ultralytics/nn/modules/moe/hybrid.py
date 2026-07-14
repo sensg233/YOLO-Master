@@ -37,7 +37,7 @@ from .routers import (
     AdaptiveRoutingLayer, DynamicRoutingLayer, AdvancedRoutingLayer,
 )
 from ultralytics.nn.modules.block import ABlock, A2C2f, C3k
-from .loss import MoELoss, gshard_balance_loss, weighted_gshard_balance_loss, differentiable_balance_loss, all_reduce_mean
+from .loss import MoELoss, gshard_balance_loss, weighted_gshard_balance_loss, differentiable_balance_loss, all_reduce_mean, should_reduce_ddp
 from .scheduler import MoEDynamicScheduler, MoEDynamicSchedulerConfig
 
 # Cross-submodule imports: hybrid classes inherit from advanced.py classes
@@ -841,7 +841,7 @@ class AdaptiveBalanceController(nn.Module):
                 router_probs, expert_usage, self.num_experts, target_usage=importance_weights
             )
         else:
-            balance_loss = weighted_gshard_balance_loss(expert_usage, importance_weights, self.num_experts, reduce_ddp=True)
+            balance_loss = weighted_gshard_balance_loss(expert_usage, importance_weights, self.num_experts, reduce_ddp=should_reduce_ddp(self))
 
         # === 3. Entropy Regularization (Encourage Diversity, non-negative) ===
         # Penalize LOW entropy (collapse); max entropy = log(N) -> penalty 0.

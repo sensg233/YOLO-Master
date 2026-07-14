@@ -20,6 +20,21 @@ def _dtype_clamp_min(tensor: torch.Tensor, min_val: float = 1e-6) -> torch.Tenso
     return tensor.clamp_min(min_val)
 
 
+def should_reduce_ddp(module: Optional[nn.Module] = None) -> bool:
+    """Return True only for aligned training forwards that require global aux statistics.
+
+    Rank0-only validation/inference/export/profile run in eval mode or without gradients
+    and must never enter the training process-group collective sequence.
+    """
+    return bool(
+        (module is None or module.training)
+        and torch.is_grad_enabled()
+        and dist.is_available()
+        and dist.is_initialized()
+        and dist.get_world_size() > 1
+    )
+
+
 def all_reduce_mean(tensor: torch.Tensor) -> torch.Tensor:
     """Average a tensor across DDP ranks (gradient-preserving, no-op on 1 GPU).
 
@@ -197,7 +212,7 @@ class MoELoss(nn.Module):
         local_expert_counts = F.one_hot(flat_indices, num_classes=self.num_experts).float().sum(dim=0)
         total = flat_indices.numel()
 
-        if dist.is_available() and dist.is_initialized():
+        if should_reduce_ddp(self):
             # Counts are integer-valued; reduce in float32 so float16 models do
             # not lose precision when summing large counts across ranks.
             counts32 = local_expert_counts.float()
@@ -214,7 +229,7 @@ class MoELoss(nn.Module):
 
     def _get_global_mean(self, tensor: torch.Tensor) -> torch.Tensor:
         """Computes the mean of a tensor across all distributed processes."""
-        if not (dist.is_available() and dist.is_initialized()):
+        if not should_reduce_ddp(self):
             return tensor.mean(dim=0)
 
         # Sum locally in float32 to keep the cross-rank reduction numerically

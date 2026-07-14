@@ -37,7 +37,7 @@ from .routers import (
     AdaptiveRoutingLayer, DynamicRoutingLayer, AdvancedRoutingLayer,
 )
 from ultralytics.nn.modules.block import ABlock, A2C2f, C3k
-from .loss import MoELoss, gshard_balance_loss, weighted_gshard_balance_loss, differentiable_balance_loss, all_reduce_mean
+from .loss import MoELoss, gshard_balance_loss, weighted_gshard_balance_loss, differentiable_balance_loss, all_reduce_mean, should_reduce_ddp
 from .scheduler import MoEDynamicScheduler, MoEDynamicSchedulerConfig
 
 # ---- Base MoE classes (split from modules.py) ----
@@ -171,7 +171,7 @@ class UltraOptimizedMoE(nn.Module):
                 importance.unsqueeze(0),
                 usage_freq,
                 self.num_experts,
-                reduce_ddp=True,
+                reduce_ddp=should_reduce_ddp(self),
             )
 
             aux_loss = (self.balance_loss_coeff * balance_loss) + (self.router_z_loss_coeff * z_loss_val)
@@ -307,7 +307,7 @@ class AdaptiveCapacityMoE(UltraOptimizedMoE):
                 importance.unsqueeze(0),
                 usage_freq,
                 self.num_experts,
-                reduce_ddp=True,
+                reduce_ddp=should_reduce_ddp(self),
             )
             aux_loss = (self.balance_loss_coeff * balance_loss) + (self.router_z_loss_coeff * z_loss_val)
             _registry_set(self, aux_loss)
@@ -507,9 +507,9 @@ class ES_MOE(nn.Module):
     def _compute_load_balancing_loss(self, routing_weights, eps=1e-6):
         """Compute load-balancing loss (GShard scale, ~1.0 at balance)."""
         expert_usage = routing_weights.mean(dim=(0, 2, 3))
-        # reduce_ddp=True → usage averaged across ranks so all GPUs share one
+        # reduce_ddp=should_reduce_ddp(self) → usage averaged across ranks so all GPUs share one
         # global balance target (matches MoELoss; no-op on single GPU).
-        load_balance_loss = gshard_balance_loss(expert_usage, self.num_experts, reduce_ddp=True)
+        load_balance_loss = gshard_balance_loss(expert_usage, self.num_experts, reduce_ddp=should_reduce_ddp(self))
 
         # Guard against NaN loss (graph-safe: keep grad_fn instead of new leaf)
         if not torch.isfinite(load_balance_loss).all():

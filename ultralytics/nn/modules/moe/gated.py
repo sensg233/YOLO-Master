@@ -22,7 +22,7 @@ from .routers import (
 )
 from .loss import (
     MoELoss, gshard_balance_loss, weighted_gshard_balance_loss,
-    differentiable_balance_loss, all_reduce_mean
+    differentiable_balance_loss, all_reduce_mean, should_reduce_ddp
 )
 from .scheduler import (
     MoEDynamicScheduler, MoEDynamicSchedulerConfig,
@@ -839,8 +839,8 @@ class HyperFusedMoE(nn.Module):
             dev = probs.device if isinstance(probs, torch.Tensor) else None
             usage = torch.full((self.num_experts,), 1.0 / self.num_experts, device=dev)
         if isinstance(probs, torch.Tensor):
-            return differentiable_balance_loss(probs, usage, self.num_experts, reduce_ddp=True)
-        return gshard_balance_loss(usage, self.num_experts, reduce_ddp=True)
+            return differentiable_balance_loss(probs, usage, self.num_experts, reduce_ddp=should_reduce_ddp(self))
+        return gshard_balance_loss(usage, self.num_experts, reduce_ddp=should_reduce_ddp(self))
     
     @property
     def aux_loss(self):
@@ -1870,7 +1870,7 @@ class AdaptiveBalanceController(nn.Module):
                 router_probs, expert_usage, self.num_experts, target_usage=importance_weights
             )
         else:
-            balance_loss = weighted_gshard_balance_loss(expert_usage, importance_weights, self.num_experts, reduce_ddp=True)
+            balance_loss = weighted_gshard_balance_loss(expert_usage, importance_weights, self.num_experts, reduce_ddp=should_reduce_ddp(self))
 
         # === 3. Entropy Regularization (Encourage Diversity, non-negative) ===
         # Penalize LOW entropy (collapse); max entropy = log(N) -> penalty 0.
