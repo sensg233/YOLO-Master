@@ -2326,7 +2326,12 @@ class BaseTrainer:
         if getattr(target, "lora_enabled", False):
             load_lora_compatible_state_dict(target, ema_state, context="NaN recovery checkpoint EMA", adapter_only=True)
         else:
-            target.load_state_dict(ema_state)
+            # Use strict=False because EMA may lack lazy-init buffers (e.g.
+            # _mixture_loss_ema_buf) that were registered on the live model after
+            # the EMA snapshot was created.
+            missing, unexpected = target.load_state_dict(ema_state, strict=False)
+            if missing:
+                LOGGER.warning(f"[NaN recovery] EMA state_dict missing keys (non-fatal): {missing}")
         self._load_checkpoint_state(ckpt)
         self._gradient_nonfinite = False
         self._nonfinite_diagnostic = None
