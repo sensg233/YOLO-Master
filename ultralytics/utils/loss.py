@@ -147,7 +147,14 @@ def _mixture_aux_isolation_flags(losses: tuple[torch.Tensor, ...]) -> list[bool]
         device=losses[0].device,
     )
     if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(flags, op=dist.ReduceOp.MAX)
+        try:
+            dist.all_reduce(flags, op=dist.ReduceOp.MAX)
+        except Exception:
+            # If the DDP process group is in a bad state (e.g. one rank has
+            # already crashed or GPU-hung), swallow the error and fall back to
+            # local flags.  This prevents a 600-second NCCL timeout; training
+            # will likely fail soon anyway, but we get a cleaner traceback.
+            pass
     return [bool(flag) for flag in flags.cpu().tolist()]
 
 
@@ -189,6 +196,12 @@ def _collect_mixture_aux_loss(
     ``moa_gain``) before summation, so users can up-weight MoT routing
     regularisation without inflating MoE balance loss, and vice versa.
     """
+    # Guard: aux losses are training-only. During validation the model is in
+    # eval mode and gradient/regularisation terms are irrelevant. Skipping
+    # them here also prevents DDP collective deadlocks when ranks finish
+    # validation at different speeds or one rank GPU-hangs on a particular batch.
+    if model is not None and not getattr(model, "training", True):
+        return torch.tensor(0.0, device=device)
     moe_l = _collect_moe_aux_loss(model, device)
     mot_l = _collect_mot_aux_loss(model, device)
     moa_l = _collect_moa_aux_loss(model, device)

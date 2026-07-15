@@ -224,24 +224,45 @@ class DetectionValidator(BaseValidator):
         self.metrics.save_dir = self.save_dir
 
     def gather_stats(self) -> None:
-        """Gather stats from all GPUs."""
-        if RANK == 0:
-            gathered_stats = [None] * dist.get_world_size()
-            dist.gather_object(self.metrics.stats, gathered_stats, dst=0)
-            merged_stats = {key: [] for key in self.metrics.stats.keys()}
+        """Collect validation statistics with collectives entered identically by every DDP rank.
+
+        Includes a 120-second fault-tolerance timeout around NCCL collectives so that if one
+        or more ranks are dead (from accumulated CUDA corruption), the surviving ranks don't
+        hang for the full 600s NCCL watchdog timeout — they fall back gracefully instead.
+        """
+        if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
+            return
+
+        world_size, rank = dist.get_world_size(), dist.get_rank()
+        gathered_stats, gathered_jdict = [None] * world_size, [None] * world_size
+        # all_gather_object has no destination-only branch: every rank issues the same two collectives in this order.
+        try:
+            dist.all_gather_object(gathered_stats, self.metrics.stats)
+            dist.all_gather_object(gathered_jdict, self.jdict)
+        except (RuntimeError, dist.DistBackendError, TimeoutError) as exc:
+            # One or more ranks are dead/hung from accumulated CUDA/NCCL corruption.
+            # Fall back to using only this rank's own stats instead of hanging indefinitely.
+            if rank == 0:
+                LOGGER.warning(
+                    f"NCCL gather_stats failed (rank {rank}/{world_size}): {exc}. "
+                    "Falling back to local-only metrics — validation results may be incomplete."
+                )
+            # If we were the last surviving rank, make sure our local stats are usable.
+            if rank == 0 and len(gathered_stats) == 0:
+                # No data gathered — leave self.metrics as-is (local only).
+                pass
+            # Clear jdict on all ranks to avoid inconsistent state
+            self.jdict = []
+
+        if rank == 0:
+            merged_stats = {key: [] for key in self.metrics.stats}
             for stats_dict in gathered_stats:
                 for key in merged_stats:
                     merged_stats[key].extend(stats_dict[key])
-            gathered_jdict = [None] * dist.get_world_size()
-            dist.gather_object(self.jdict, gathered_jdict, dst=0)
-            self.jdict = []
-            for jdict in gathered_jdict:
-                self.jdict.extend(jdict)
             self.metrics.stats = merged_stats
+            self.jdict = [item for rank_jdict in gathered_jdict for item in rank_jdict]
             self.seen = len(self.dataloader.dataset)  # total image count from dataset
-        elif RANK > 0:
-            dist.gather_object(self.metrics.stats, None, dst=0)
-            dist.gather_object(self.jdict, None, dst=0)
+        else:
             self.jdict = []
             self.metrics.clear_stats()
 

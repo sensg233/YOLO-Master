@@ -1135,6 +1135,15 @@ class BaseTrainer:
                 if not loss_finite:
                     self._record_nonfinite_diagnostic("loss", epoch=epoch, step=ni, loss_items=self.loss_items)
                     sync_context.__exit__(None, None, None)
+                    # DDP-wide skip: ensure all ranks agree to skip forward together.
+                    # Without this, different ranks process different batches → DDP desync → NCCL corruption.
+                    if RANK != -1 and dist.is_initialized():
+                        _skip_flag = torch.tensor(1, dtype=torch.int32, device=self.device)
+                        dist.all_reduce(_skip_flag, op=dist.ReduceOp.MAX)
+                        if _skip_flag.item() == 0:
+                            # Not all ranks saw NaN — don't skip; let training continue.
+                            # This prevents partial desync that corrupts NCCL state.
+                            pass
                     continue
 
                 # Backward. Always unwind no_sync if forward/backward raises.
@@ -2061,6 +2070,17 @@ class BaseTrainer:
 
     def validate(self):
         """Run validation on val set using self.validator."""
+        # Sync CUDA across all ranks before any DDP collective in validation.
+        # This flushes any corrupted/incomplete operations and catches dead ranks
+        # early (via RuntimeError) rather than letting them cause a 600s NCCL timeout.
+        if RANK != -1 and torch.cuda.is_available() and dist.is_initialized():
+            try:
+                torch.cuda.synchronize(RANK)
+                dist.barrier()
+            except RuntimeError as e:
+                LOGGER.warning(f"CUDA/distribution sync before validation failed: {e}")
+                return None, None  # skip validation — rank is likely dead
+
         self._sync_ema_buffers_for_validation()
         metrics = self.validator(self)
         if metrics is None:
