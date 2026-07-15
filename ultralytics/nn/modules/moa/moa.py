@@ -436,15 +436,28 @@ def _moa_router_aux_loss(weights: torch.Tensor, logits: torch.Tensor, coeff: flo
         importance = importance + local_grad
     else:
         importance = local_sum / local_count.clamp_min(1.0)
-    importance = importance / importance.sum().clamp_min(1e-6)
+    importance_sum = importance.sum().clamp_min(1e-6)
+    # Prevent Inf propagation from importance division (all-reduce can produce Inf)
+    if not torch.isfinite(importance_sum).any():
+        importance_sum = importance_sum.new_tensor(1.0)
+    importance = importance / importance_sum
     balance_loss = num_groups * torch.sum(importance * importance)
-    z_loss = torch.logsumexp(logits.float(), dim=1).pow(2).mean()
-    entropy = -(importance * torch.log(importance.clamp_min(1e-6))).sum()
+    # Stabilize z-loss: clip logits before logsumexp to prevent overflow (logsumexp of >88 -> inf in float32)
+    safe_logits = logits.float().clamp(min=-80, max=80)
+    log_z = torch.logsumexp(safe_logits, dim=1)
+    z_loss = (log_z ** 2).clamp(max=80).mean()
+    # Guard: clamp importance to finite before entropy computation
+    importance_safe = importance.clamp(min=0.0, max=1.0)
+    entropy = -(importance_safe * torch.log(importance_safe.clamp_min(1e-6))).sum()
     max_entropy = math.log(max(num_groups, 2))
     entropy_deficit = (max_entropy - entropy).clamp_min(0.0) / max_entropy
     # Lower entropy weight (0.01) avoids over-constraining the router toward
     # uniform mixing when balance_loss already encourages load balance.
-    return coeff * (balance_loss + 0.1 * z_loss + 0.01 * entropy_deficit)
+    result = coeff * (balance_loss + 0.1 * z_loss + 0.01 * entropy_deficit)
+    # Final safety: prevent Inf/NaN aux_loss from poisoning the total loss
+    if not torch.isfinite(result):
+        return weights.new_zeros(())
+    return result
 
 
 # ---------------------------------------------------------------------------

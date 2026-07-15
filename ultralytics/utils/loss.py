@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -107,7 +108,33 @@ def _get_mixture_loss_ema(model: nn.Module | None) -> dict[str, float] | None:
         # Re-align buffer device if model was moved after lazy-init
         # (e.g. CPU checkpoint resumed then moved to CUDA).
         buf.data = buf.to(target_device)
-    return {_MIXTURE_LOSS_EMA_KEYS[i]: float(buf[i]) for i in range(len(_MIXTURE_LOSS_EMA_KEYS))}
+    result = {}
+    for i in range(len(_MIXTURE_LOSS_EMA_KEYS)):
+        v = float(buf[i])
+        # Guard against NaN/Inf leakage from corrupted buffers
+        if not (v == v and abs(v) < 1e6):  # NaN self-check + magnitude bound
+            result[_MIXTURE_LOSS_EMA_KEYS[i]] = _MIXTURE_LOSS_EMA_DEFAULTS[_MIXTURE_LOSS_EMA_KEYS[i]]
+        else:
+            result[_MIXTURE_LOSS_EMA_KEYS[i]] = v
+    return result
+
+
+def _mixture_aux_isolation_enabled(model: nn.Module | None) -> bool:
+    """Return whether explicitly opted-in auxiliary-loss isolation is enabled."""
+    args = getattr(model, "args", None)
+    return bool(getattr(args, "mixture_aux_isolate_nonfinite", False))
+
+
+def _mixture_aux_isolation_flags(losses: tuple[torch.Tensor, ...]) -> list[bool]:
+    """Synchronize finite flags so every DDP rank makes the identical isolation choice."""
+    flags = torch.tensor(
+        [int(not bool(torch.isfinite(loss).all().item())) for loss in losses],
+        dtype=torch.int32,
+        device=losses[0].device,
+    )
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(flags, op=dist.ReduceOp.MAX)
+    return [bool(flag) for flag in flags.cpu().tolist()]
 
 
 def _update_mixture_loss_ema(model: nn.Module | None, key: str, loss_t: torch.Tensor) -> None:
@@ -145,6 +172,20 @@ def _collect_mixture_aux_loss(
     moe_l = _collect_moe_aux_loss(model, device)
     mot_l = _collect_mot_aux_loss(model, device)
     moa_l = _collect_moa_aux_loss(model, device)
+    aux_losses = (moe_l, mot_l, moa_l)
+    nonfinite = _mixture_aux_isolation_flags(aux_losses)
+    aux_names = ("moe", "mot", "moa")
+    if model is not None:
+        model._mixture_aux_nonfinite = {name: bad for name, bad in zip(aux_names, nonfinite)}
+        model._mixture_aux_isolated = False
+    if any(nonfinite):
+        if not _mixture_aux_isolation_enabled(model):
+            # Keep the failure visible by returning the original non-finite term.
+            return sum(aux_losses)
+        # The flag is synchronized above: every DDP rank substitutes the same
+        # optional auxiliary component with a graph-safe zero.
+        aux_losses = tuple(loss.new_zeros(()) if bad else loss for loss, bad in zip(aux_losses, nonfinite))
+        moe_l, mot_l, moa_l = aux_losses
 
     _update_mixture_loss_ema(model, "moe", moe_l)
     _update_mixture_loss_ema(model, "mot", mot_l)
@@ -152,15 +193,27 @@ def _collect_mixture_aux_loss(
 
     ema = _get_mixture_loss_ema(model)
     if ema is not None:
-        moe_scale = moe_l.new_tensor(max(ema["moe"], _MIXTURE_LOSS_EMA_FLOOR))
-        mot_scale = mot_l.new_tensor(max(ema["mot"], _MIXTURE_LOSS_EMA_FLOOR))
-        moa_scale = moa_l.new_tensor(max(ema["moa"], _MIXTURE_LOSS_EMA_FLOOR))
+        moe_scale_val = max(ema["moe"], _MIXTURE_LOSS_EMA_FLOOR)
+        mot_scale_val = max(ema["mot"], _MIXTURE_LOSS_EMA_FLOOR)
+        moa_scale_val = max(ema["moa"], _MIXTURE_LOSS_EMA_FLOOR)
     else:
-        moe_scale = moe_l.detach().clamp(min=_MIXTURE_LOSS_EMA_FLOOR)
-        mot_scale = mot_l.detach().clamp(min=_MIXTURE_LOSS_EMA_FLOOR)
-        moa_scale = moa_l.detach().clamp(min=_MIXTURE_LOSS_EMA_FLOOR)
+        moe_scale_val = float(moe_l.detach().clamp(min=_MIXTURE_LOSS_EMA_FLOOR).item())
+        mot_scale_val = float(mot_l.detach().clamp(min=_MIXTURE_LOSS_EMA_FLOOR).item())
+        moa_scale_val = float(moa_l.detach().clamp(min=_MIXTURE_LOSS_EMA_FLOOR).item())
 
-    return (moe_l / moe_scale * moe_gain) + (mot_l / mot_scale * mot_gain) + (moa_l / moa_scale * moa_gain)
+    # Guard: clamp scales to finite range before division — prevents NaN from
+    # corrupted EMA buffers propagating through the normalisation step.
+    SAFE_SCALE_RANGE = (1e-6, 1e6)
+    moe_scale_val = float(torch.tensor(moe_scale_val).clamp(min=SAFE_SCALE_RANGE[0], max=SAFE_SCALE_RANGE[1]).item())
+    mot_scale_val = float(torch.tensor(mot_scale_val).clamp(min=SAFE_SCALE_RANGE[0], max=SAFE_SCALE_RANGE[1]).item())
+    moa_scale_val = float(torch.tensor(moa_scale_val).clamp(min=SAFE_SCALE_RANGE[0], max=SAFE_SCALE_RANGE[1]).item())
+
+    aux_result = ((moe_l / moe_scale_val * moe_gain) + (mot_l / mot_scale_val * mot_gain) +
+                  (moa_l / moa_scale_val * moa_gain))
+    # Final non-finite guard: if anything went wrong upstream, return safe zero
+    if not torch.isfinite(aux_result).all():
+        return moe_l.new_zeros(())
+    return aux_result
 
 
 class VarifocalLoss(nn.Module):

@@ -643,8 +643,11 @@ class _MoTRouter(nn.Module):
 
     @staticmethod
     def z_loss_from_logits(logits: torch.Tensor) -> torch.Tensor:
-        log_z = torch.logsumexp(logits, dim=1)
-        return (log_z ** 2).mean()
+        # Clamp logits before logsumexp to prevent overflow (logsumexp of >88 overflows in float32)
+        safe_logits = logits.float().clamp(min=-80, max=80)
+        log_z = torch.logsumexp(safe_logits, dim=1)
+        # Also clamp the z_loss result itself to prevent inf propagation
+        return ((log_z ** 2).clamp(max=80)).mean()
 
     def forward(self, x: torch.Tensor, return_logits: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -725,6 +728,9 @@ def _mot_router_aux_loss(
         total = total + balance_coeff * balance
     if z_coeff > 0:
         total = total + z_coeff * z_loss
+    # Guard against non-finite aux_loss propagating to total loss
+    if not torch.isfinite(total):
+        return weights.new_zeros(())
     return total
 
 
