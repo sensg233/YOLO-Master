@@ -19,7 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Dict, Optional, Union
 
-from .utils import FlopsUtils, get_safe_groups, BatchedExpertComputation
+from .utils import FlopsUtils, get_safe_groups, BatchedExpertComputation, index_add_aligned_, cast_like
 from .experts import (
     OptimizedSimpleExpert, FusedGhostExpert, SimpleExpert, GhostExpert,
     InvertedResidualExpert, EfficientExpertGroup, SpatialExpert, SharedInvertedExpertGroup
@@ -577,8 +577,8 @@ class ES_MOE(nn.Module):
             expert_out = self.experts[expert_idx](x[batch_indices])
             weight = routing_weights[batch_indices, expert_idx:expert_idx + 1, :, :]
 
-            # Accumulate
-            final_output.index_add_(0, batch_indices, expert_out * weight)
+            # AMP: BN/GN experts may return fp32 while accumulator is fp16
+            index_add_aligned_(final_output, 0, batch_indices, expert_out.float() * weight.float())
 
         return final_output
 
@@ -742,11 +742,8 @@ class OptimizedMOE(nn.Module):
                 w_k = flat_weights[:, k]                                          # [B]
                 idx_exp = idx_k.view(B, 1, 1, 1, 1).expand(B, 1, self.out_channels, H, W)
                 selected = torch.gather(all_outs, 1, idx_exp).squeeze(1)          # [B, out_C, H, W]
-                if selected.dtype != expert_output.dtype:
-                    selected = selected.to(expert_output.dtype)
-                if w_k.dtype != expert_output.dtype:
-                    w_k = w_k.to(expert_output.dtype)
-                expert_output = expert_output + selected * w_k.view(B, 1, 1, 1)
+                w_k = cast_like(w_k, expert_output)
+                expert_output = expert_output + cast_like(selected, expert_output) * w_k.view(B, 1, 1, 1)
         else:
             # Iterate over all experts
             for i in range(self.num_experts):
@@ -768,14 +765,8 @@ class OptimizedMOE(nn.Module):
                     # Extract weights and reshape for broadcast: [selected_count, 1, 1, 1]
                     w = flat_weights[batch_idx, k_idx].view(-1, 1, 1, 1)
 
-                    # Accumulate results (index_add_ faster than per-loop assignment)
-                    # Note: convert dtype if mismatched
-                    if out.dtype != expert_output.dtype:
-                        out = out.to(expert_output.dtype)
-                    if w.dtype != expert_output.dtype:
-                        w = w.to(expert_output.dtype)
-
-                    expert_output.index_add_(0, batch_idx, out * w)
+                    # Accumulate (AMP-safe: BN/GN may promote out to fp32)
+                    index_add_aligned_(expert_output, 0, batch_idx, out.float() * w.float())
 
         # Guard against activation explosion on routing collapse (all tokens -> 1 expert)
         expert_output = expert_output.clamp_(-1e4, 1e4)
@@ -1003,7 +994,8 @@ class OptimizedMOEImproved(nn.Module):
                 w_k = weights_flat[:, k]                                          # [B]
                 idx_exp = idx_k.view(B, 1, 1, 1, 1).expand(B, 1, self.out_channels, H, W)
                 selected = torch.gather(all_outs, 1, idx_exp).squeeze(1)          # [B, out_C, H, W]
-                expert_output = expert_output + selected * w_k.view(B, 1, 1, 1)
+                w_k = cast_like(w_k, expert_output)
+                expert_output = expert_output + cast_like(selected, expert_output) * w_k.view(B, 1, 1, 1)
         else:
             for i in active_experts:
                 # Find all samples assigned to expert i
@@ -1018,8 +1010,8 @@ class OptimizedMOEImproved(nn.Module):
                     # Select weights and broadcast (no gradient to router)
                     w = weights_flat[batch_idx, k_idx].view(-1, 1, 1, 1)
 
-                    # Accumulate results
-                    expert_output.index_add_(0, batch_idx, out.to(expert_output.dtype) * w.to(expert_output.dtype))
+                    # Accumulate results (AMP-safe dtype alignment)
+                    index_add_aligned_(expert_output, 0, batch_idx, out.float() * w.float())
 
         # Guard against activation explosion on routing collapse (all tokens -> 1 expert)
         expert_output = expert_output.clamp_(-1e4, 1e4)

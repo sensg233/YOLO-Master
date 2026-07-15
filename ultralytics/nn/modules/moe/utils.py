@@ -51,6 +51,33 @@ def last_conv_out_channels(module: nn.Module) -> int:
     raise ValueError(f"No nn.Conv2d found in expert module {type(module).__name__}")
 
 
+def index_add_aligned_(
+    output: torch.Tensor,
+    dim: int,
+    index: torch.Tensor,
+    source: torch.Tensor,
+) -> torch.Tensor:
+    """``index_add_`` with AMP-safe dtype alignment.
+
+    Under ``torch.amp.autocast``, ops such as ``BatchNorm`` / ``GroupNorm`` /
+    ``LayerNorm`` promote activations to float32 while sparse MoE accumulators
+    (built via ``x.new_zeros`` / ``torch.zeros(..., dtype=x.dtype)``) often stay
+    float16. ``Tensor.index_add_`` requires matching scalar types and raises::
+
+        RuntimeError: index_add_(): self (Half) and source (Float) must have the same scalar type
+
+    Cast ``source`` to ``output.dtype`` before accumulating.
+    """
+    if source.dtype != output.dtype:
+        source = source.to(dtype=output.dtype)
+    return output.index_add_(dim, index, source)
+
+
+def cast_like(tensor: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Cast ``tensor`` to ``ref.dtype`` when they differ (no-op otherwise)."""
+    return tensor if tensor.dtype == ref.dtype else tensor.to(dtype=ref.dtype)
+
+
 # ==========================================
 # Utility: FLOPs calculator (optimized)
 # ==========================================
@@ -135,7 +162,9 @@ class BatchedExpertComputation:
                 w_k = weights_flat[:, k]                                     # [B]
                 idx_exp = idx_k.view(B, 1, 1, 1, 1).expand(B, 1, out_channels, H, W)
                 selected = torch.gather(all_outs, 1, idx_exp).squeeze(1)     # [B, out_C, H, W]
-                expert_output = expert_output + selected * w_k.view(B, 1, 1, 1)
+                expert_output = expert_output + cast_like(selected, expert_output) * cast_like(
+                    w_k.view(B, 1, 1, 1), expert_output
+                )
 
             return expert_output.clamp_(-1e4, 1e4)
 
@@ -172,10 +201,9 @@ class BatchedExpertComputation:
 
             # weights_flat is always [B, top_k] now; index by (batch, k).
             weights = weights_flat[batch_indices, k_indices].view(-1, 1, 1, 1)
-            weighted_out = expert_out * weights
-
-            # Accumulate outputs (efficient index_add_)
-            expert_output.index_add_(0, batch_indices, weighted_out.to(expert_output.dtype))
+            # Multiply in fp32 for stability, then AMP-align into accumulator.
+            weighted_out = expert_out.float() * weights.float()
+            index_add_aligned_(expert_output, 0, batch_indices, weighted_out)
 
         # Guard against activation explosion if routing collapses (all tokens to
         # one expert) so downstream norm layers don't produce NaN.

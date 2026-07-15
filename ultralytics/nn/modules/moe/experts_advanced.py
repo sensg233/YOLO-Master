@@ -109,8 +109,8 @@ class FusedExpertGroup(nn.Module):
 
         # === 5. Weighted sum over top_k ===
         output = (normed * wts.view(B, top_k, 1, 1, 1)).sum(dim=1)  # [B, OC, H, W]
-
-        return output
+        # AMP: F.group_norm promotes to fp32; restore input dtype for cat/residual
+        return output if output.dtype == x.dtype else output.to(dtype=x.dtype)
 
     def compute_flops(self, input_shape):
         """FLOPs calculation"""
