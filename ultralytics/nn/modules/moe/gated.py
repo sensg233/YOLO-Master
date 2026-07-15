@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Dict, Optional, Union
 
-from .utils import FlopsUtils, get_safe_groups, BatchedExpertComputation, index_add_aligned_
+from .utils import FlopsUtils, get_safe_groups, BatchedExpertComputation
 from .experts import (
     OptimizedSimpleExpert, FusedGhostExpert, SimpleExpert, GhostExpert,
     InvertedResidualExpert, EfficientExpertGroup, SpatialExpert, SharedInvertedExpertGroup
@@ -382,32 +382,27 @@ class AdaptiveGateMoE(nn.Module):
             nn.init.normal_(self.routing.global_fc.weight, std=0.05)
 
     def _safe_complexity(self, x_dynamic):
-        """Compute complexity score with NaN/Inf protection (graph-safe)."""
+        """Compute complexity score with NaN/Inf protection."""
         raw = self.complexity_estimator(x_dynamic).mean()
-        # Avoid Python data-dependent branches (isnan.item sync) that interact
-        # poorly with DDP unused-parameter detection under LoRA.
-        return torch.nan_to_num(raw, nan=1.0, posinf=1.5, neginf=0.3).clamp(0.3, 1.5)
+        if torch.isnan(raw) or torch.isinf(raw):
+            return torch.tensor(1.0, device=raw.device, dtype=raw.dtype)
+        # Smooth clamping: keep in [0.3, 1.5] to avoid degenerate top_k
+        return raw.clamp(0.3, 1.5)
 
     def _apply_complexity_gate(self, routing_weights, routing_indices, routing_stats, complexity):
         """Apply complexity-aware Top-K masking without CPU synchronization.
 
         Older versions converted the scalar complexity score to Python with
-        ``.item()`` and then sliced Top-K tensors. That forces GPU/MPS sync and
+        `.item()` and then sliced Top-K tensors. That forces GPU/MPS sync and
         creates dynamic tensor shapes. Keeping the full Top-K shape while
         zeroing low-rank weights preserves the adaptive behavior with a much
         friendlier execution path.
-
-        The discrete ``round`` / compare path has no useful gradient into the
-        complexity estimator, so we ``detach()`` before gating. This prevents
-        LoRA adapters on ``complexity_estimator`` from entering a half-used
-        autograd state that triggers DDP "marked as ready twice" under
-        ``find_unused_parameters=True`` + gradient checkpointing.
         """
         top_k = routing_weights.shape[1]
         if top_k <= 1:
             return routing_weights, routing_indices, routing_stats, top_k
 
-        safe_complexity = torch.nan_to_num(complexity, nan=1.0, posinf=1.0, neginf=1.0).clamp(0.3, 1.5).detach()
+        safe_complexity = torch.nan_to_num(complexity, nan=1.0, posinf=1.0, neginf=1.0).clamp(0.3, 1.5)
         keep_count = torch.round(safe_complexity * top_k).clamp(1, top_k)
         expert_rank = torch.arange(1, top_k + 1, device=routing_weights.device, dtype=keep_count.dtype)
         mask = (expert_rank.view(1, top_k, 1, 1) <= keep_count).to(routing_weights.dtype)
@@ -1022,8 +1017,8 @@ class FusedExpertGroup(nn.Module):
 
         # === 5. Weighted sum over top_k ===
         output = (normed * wts.view(B, top_k, 1, 1, 1)).sum(dim=1)  # [B, OC, H, W]
-        # AMP: F.group_norm promotes to fp32; restore input dtype for cat/residual
-        return output if output.dtype == x.dtype else output.to(dtype=x.dtype)
+
+        return output
     
     def compute_flops(self, input_shape):
         """FLOPs calculation"""
@@ -2368,8 +2363,7 @@ class DiversifiedExpertGroup(nn.Module):
                 w_k = weights[:, k] * valid_mask[:, k].to(weights.dtype)
                 idx_exp = idx_k.view(B, 1, 1, 1, 1).expand(B, 1, self.out_channels, H, W)
                 selected = torch.gather(all_projs, 1, idx_exp).squeeze(1)
-                weighted = selected.to(dtype=output.dtype) * w_k.view(B, 1, 1, 1).to(dtype=output.dtype)
-                output = output + weighted
+                output = output + selected * w_k.view(B, 1, 1, 1)
             return output
 
         active_experts = torch.unique(indices[valid_mask]).to(torch.long).tolist()
@@ -2379,11 +2373,9 @@ class DiversifiedExpertGroup(nn.Module):
             expert_mask = (indices == expert_idx) & valid_mask
             batch_indices, k_indices = torch.where(expert_mask)
             expert_out = projection(dw_feat[batch_indices])
-            expert_weight = weights[batch_indices, k_indices].view(-1, 1, 1, 1)
-            # AMP: GroupNorm promotes expert_out to fp32 while ``output`` stays
-            # fp16. Multiply in fp32 then align for index_add_.
-            weighted = expert_out.float() * expert_weight.float()
-            index_add_aligned_(output, 0, batch_indices, weighted)
+            expert_weight = weights[batch_indices, k_indices].view(-1, 1, 1, 1).to(expert_out.dtype)
+            # fp16-safe: cast accumulator source to match output dtype (P0-2 fix)
+            output.index_add_(0, batch_indices, (expert_out * expert_weight).to(output.dtype))
 
         return output
 

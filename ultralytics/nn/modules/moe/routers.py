@@ -214,6 +214,12 @@ class BaseRouter(nn.Module):
                 # Randomly select which tokens get routed normally (first max_tokens)
                 indices = torch.randperm(B, device=logits.device)[:max_tokens]
                 overflow_mask[indices] = True
+                # Overflow tokens are sent to the default expert (expert 0).
+                topk_indices = topk_indices.clone()
+                topk_indices[~overflow_mask] = 0
+                topk_vals = topk_vals.clone()
+                topk_vals[~overflow_mask] = 0
+                topk_vals[~overflow_mask, 0] = 1
 
         # 4) Normalize weights
         sum_vals = topk_vals.sum(dim=1, keepdim=True) + 1e-6

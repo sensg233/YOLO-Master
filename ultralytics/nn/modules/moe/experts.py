@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 import math
-from .utils import FlopsUtils, get_safe_groups, index_add_aligned_
+from .utils import FlopsUtils, get_safe_groups
 
 
 # ==========================================
@@ -249,9 +249,7 @@ class SharedInvertedExpertGroup(nn.Module):
                 w_k = weights[:, k] * valid_mask[:, k].to(weights.dtype)           # [B]
                 idx_exp = idx_k.view(B, 1, 1, 1, 1).expand(B, 1, self.out_channels, H, W)
                 selected = torch.gather(all_projs, 1, idx_exp).squeeze(1)          # [B, out_C, H, W]
-                # BN/GN under AMP may promote selected to fp32; keep output dtype.
-                weighted = selected.to(dtype=output.dtype) * w_k.view(B, 1, 1, 1).to(dtype=output.dtype)
-                output = output + weighted
+                output = output + selected * w_k.view(B, 1, 1, 1)
             return output
 
         active_experts = torch.unique(indices[valid_mask]).to(torch.long).tolist()
@@ -261,11 +259,9 @@ class SharedInvertedExpertGroup(nn.Module):
 
             batch_indices, k_indices = torch.where(expert_mask)
             expert_out = projection(features[batch_indices])
-            expert_weight = weights[batch_indices, k_indices].view(-1, 1, 1, 1)
-            # AMP: GroupNorm promotes expert_out to fp32 while ``output`` stays
-            # fp16 (from x.new_zeros). Multiply in fp32 then align for index_add_.
-            weighted = expert_out.float() * expert_weight.float()
-            index_add_aligned_(output, 0, batch_indices, weighted)
+            expert_weight = weights[batch_indices, k_indices].view(-1, 1, 1, 1).to(expert_out.dtype)
+            # P0-2 fix: fp16-safe index_add_ — source must match output dtype (output is x.new_zeros, so fp16 in AMP)
+            output.index_add_(0, batch_indices, (expert_out * expert_weight).to(output.dtype))
 
         return output
 
