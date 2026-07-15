@@ -196,27 +196,27 @@ class AdaptiveGateMoE(nn.Module):
             nn.init.normal_(self.routing.global_fc.weight, std=0.05)
 
     def _safe_complexity(self, x_dynamic):
-        """Compute complexity score with NaN/Inf protection."""
+        """Compute complexity score with NaN/Inf protection (graph-safe)."""
         raw = self.complexity_estimator(x_dynamic).mean()
-        if torch.isnan(raw) or torch.isinf(raw):
-            return torch.tensor(1.0, device=raw.device, dtype=raw.dtype)
-        # Smooth clamping: keep in [0.3, 1.5] to avoid degenerate top_k
-        return raw.clamp(0.3, 1.5)
+        return torch.nan_to_num(raw, nan=1.0, posinf=1.5, neginf=0.3).clamp(0.3, 1.5)
 
     def _apply_complexity_gate(self, routing_weights, routing_indices, routing_stats, complexity):
         """Apply complexity-aware Top-K masking without CPU synchronization.
 
         Older versions converted the scalar complexity score to Python with
-        `.item()` and then sliced Top-K tensors. That forces GPU/MPS sync and
+        ``.item()`` and then sliced Top-K tensors. That forces GPU/MPS sync and
         creates dynamic tensor shapes. Keeping the full Top-K shape while
         zeroing low-rank weights preserves the adaptive behavior with a much
         friendlier execution path.
+
+        Detach before discrete round/compare so control-path LoRA adapters do
+        not trigger DDP "marked as ready twice" under find_unused_parameters.
         """
         top_k = routing_weights.shape[1]
         if top_k <= 1:
             return routing_weights, routing_indices, routing_stats, top_k
 
-        safe_complexity = torch.nan_to_num(complexity, nan=1.0, posinf=1.0, neginf=1.0).clamp(0.3, 1.5)
+        safe_complexity = torch.nan_to_num(complexity, nan=1.0, posinf=1.0, neginf=1.0).clamp(0.3, 1.5).detach()
         keep_count = torch.round(safe_complexity * top_k).clamp(1, top_k)
         expert_rank = torch.arange(1, top_k + 1, device=routing_weights.device, dtype=keep_count.dtype)
         mask = (expert_rank.view(1, top_k, 1, 1) <= keep_count).to(routing_weights.dtype)

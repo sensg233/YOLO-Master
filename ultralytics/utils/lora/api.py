@@ -1021,19 +1021,29 @@ def apply_lora(
 
     # 6. Gradient Checkpointing (VRAM Optimization) - Actually activate
     if config.gradient_checkpointing:
-        from torch.utils.checkpoint import checkpoint
-        
-        # Enable the flag on the model for tasks.py to consume
-        if hasattr(model, "model"):
-            model.model.use_gradient_checkpointing = True
-            if hasattr(model.model, "model"):
-                model.model.model.use_gradient_checkpointing = True
-                # Patch C3k2 / Conv layers to use checkpointing if they support it
-                _activate_gradient_checkpointing(model.model.model)
-        
-        # Set directly on the top-level model (LoRADetectionModel)
-        model.use_gradient_checkpointing = True
-        LOGGER.info("[LoRA] ✅ Gradient checkpointing activated (reduces VRAM by ~30-50%).")
+        from ultralytics.nn.modules.moe.utils import model_has_core_moe
+
+        if model_has_core_moe(model):
+            # MoE DDP training requires find_unused_parameters=True; combining
+            # that with gradient checkpointing triggers
+            # "parameter ... marked as ready twice" for unused LoRA adapters.
+            LOGGER.warning(
+                "[LoRA] Skipping gradient checkpointing on MoE models "
+                "(incompatible with DDP find_unused_parameters=True). "
+                "Set lora_gradient_checkpointing=False to silence this warning."
+            )
+        else:
+            # Enable the flag on the model for tasks.py to consume
+            if hasattr(model, "model"):
+                model.model.use_gradient_checkpointing = True
+                if hasattr(model.model, "model"):
+                    model.model.model.use_gradient_checkpointing = True
+                    # Patch C3k2 / Conv layers to use checkpointing if they support it
+                    _activate_gradient_checkpointing(model.model.model)
+
+            # Set directly on the top-level model (LoRADetectionModel)
+            model.use_gradient_checkpointing = True
+            LOGGER.info("[LoRA] ✅ Gradient checkpointing activated (reduces VRAM by ~30-50%).")
 
     # 6.5 MPS Compatibility Check & Warning
     device_type = None

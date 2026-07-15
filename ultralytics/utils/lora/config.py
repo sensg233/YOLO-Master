@@ -310,7 +310,21 @@ class LoRAConfigBuilder:
 
     # Pre-compiled regex for performance
     _PAT_BACKBONE_EXCLUDE = re.compile(r"(head|detect|box|cls|pred|fpn|pan|seg|pose|enc_score_head|enc_bbox_head|dec_score_head|dec_bbox_head)", re.IGNORECASE)
-    _PAT_MOE = re.compile(r"(expert|moe)", re.IGNORECASE)
+    # MoE expert / block names. Kept broad so ``include_moe=False`` actually
+    # excludes the whole MoE block, not only modules whose name contains "expert".
+    _PAT_MOE = re.compile(
+        r"(expert|moe|fused_experts|shared_(?:feature|expand|expert)|static_net|"
+        r"complexity_estimator|se_gate|routing|router|dual.?stream|gate_router)",
+        re.IGNORECASE,
+    )
+    # Always excluded from LoRA even when ``include_moe=True``: discrete/scalar
+    # control paths (often Conv2d→1ch) cause DDP "ready twice" under
+    # find_unused_parameters + gradient checkpointing because their grads are
+    # severed by round/compare while still appearing in the forward graph.
+    _PAT_MOE_CONTROL = re.compile(
+        r"(complexity_estimator|se_gate)(\.|$)",
+        re.IGNORECASE,
+    )
     _PAT_ATTN = re.compile(r"attn", re.IGNORECASE)
     # YOLO12 Area-Attention pattern: matches Conv2d-based qkv/proj/pe submodules.
     # Excluded from LoRA targets by default to avoid breaking softmax numerical stability.
@@ -352,6 +366,21 @@ class LoRAConfigBuilder:
         # Fallback: look for first numeric segment anywhere (after a dot or at start)
         match = LoRAConfigBuilder._PAT_INDEX_ANY.search(name)
         return int(match.group(1)) if match else -1
+
+    @staticmethod
+    def _is_under_moe_block(name: str, modules_by_name: dict) -> bool:
+        """Return True if ``name`` is inside a MoE block (ancestor has num_experts>0)."""
+        parts = name.split(".")
+        for i in range(len(parts)):
+            parent = modules_by_name.get(".".join(parts[: i + 1]))
+            if parent is None:
+                continue
+            if int(getattr(parent, "num_experts", 0) or 0) <= 0:
+                continue
+            mod = getattr(parent.__class__, "__module__", "") or ""
+            if mod.startswith("ultralytics.nn.modules.moe") or mod.endswith(".moe.modules") or ".moe." in mod:
+                return True
+        return False
 
     @staticmethod
     def auto_detect_targets(
@@ -433,11 +462,18 @@ class LoRAConfigBuilder:
                 )
 
         # Iterate through all sub-modules
+        modules_by_name = dict(model.named_modules())
         for name, module in model.named_modules():
             if not name: continue 
             
             # 0. Explicit Exclusion
             if name in exclude_set:
+                continue
+
+            # 0.25 Under-MoE-block exclusion: when include_moe=False, skip any
+            # submodule that lives inside a MoE block (num_experts>0), even if
+            # its own name does not contain "expert"/"moe" (e.g. proj/bn/se_gate).
+            if not include_moe and LoRAConfigBuilder._is_under_moe_block(name, modules_by_name):
                 continue
 
             # 0.5 Planner hint filter
@@ -541,6 +577,12 @@ class LoRAConfigBuilder:
 
             # MoE Check
             if not include_moe and LoRAConfigBuilder._PAT_MOE.search(lname):
+                continue
+
+            # MoE control paths: always skip (scalar gates / SE routers).
+            # Attaching LoRA here is both low-value and unsafe under DDP+AMP
+            # (unused-grad control tensors + gradient checkpointing → ready twice).
+            if LoRAConfigBuilder._PAT_MOE_CONTROL.search(lname):
                 continue
 
             # Attention Check: also handle Conv2d-based attention.
