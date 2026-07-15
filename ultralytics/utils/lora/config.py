@@ -64,7 +64,7 @@ class LoRAConfig:
     kernels: Optional[List[int]] = None
 
     # Capacity allocation knobs
-    skip_stem: bool = False  # Skip backbone stem (first 3 top-level layers)
+    skip_stem: bool = True  # Skip backbone stem (first 3 top-level layers) — prevents FP16 gradient NaN on un-normalized conv
     min_channels: int = 0    # Skip narrow layers (min(in, out) below this threshold)
 
     # Advanced Options

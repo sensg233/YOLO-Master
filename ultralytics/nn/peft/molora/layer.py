@@ -89,8 +89,20 @@ class MoLoRAExpert(nn.Module):
         init_lora_expert_b(self.lora_B.weight, self.init_type)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute delta = B @ A(x) for this expert."""
+        """Compute delta = B @ A(x) for this expert.
+
+        AMP-safe: cast the low-rank path to float32 to prevent FP16/FP8
+        overflow in intermediate convolutions (rank r is very small, so
+        the extra memory cost is negligible).  The result is returned in
+        the input dtype to stay compatible with the residual connection.
+        """
         x = self.dropout(x)
+        dtype = x.dtype
+        if dtype not in (torch.float32,):
+            # Upcast LoRA path to float32 when running under AMP (FP16/BF16).
+            with torch.autocast(device_type="cuda", enabled=False):
+                out = self.lora_B(self.lora_A(x.to(torch.float32))) * self.scaling
+            return out.to(dtype) if dtype != torch.float32 else out
         return self.lora_B(self.lora_A(x)) * self.scaling
 
     def delta_weight(self) -> torch.Tensor:

@@ -376,6 +376,7 @@ def load_lora_compatible_state_dict(
     model: nn.Module,
     source_state: Dict[str, torch.Tensor],
     context: str = "LoRA checkpoint",
+    adapter_only: bool = False,
 ) -> Dict[str, int]:
     """Load matching checkpoint tensors while making adapter mismatches explicit.
 
@@ -384,6 +385,13 @@ def load_lora_compatible_state_dict(
     adapter topology mismatches are treated as hard errors because silently
     reinitializing a partially matching adapter is almost always a bad training
     resume.
+
+    Args:
+        adapter_only: If True, only load adapter parameters (lora_, hada_, etc.).
+            Base model weights are never touched. This is critical for resume
+            from EMA checkpoints because EMA may contain stale or corrupted
+            base model weights that must not overwrite the freshly loaded
+            pre-trained backbone.
     """
     target_state = model.state_dict()
     target_keys = set(target_state)
@@ -394,6 +402,10 @@ def load_lora_compatible_state_dict(
     compatible = {}
     shape_mismatch = []
     for key, value in source_state.items():
+        # adapter_only: skip any non-adapter parameter so we never overwrite
+        # base model weights with potentially stale EMA averages.
+        if adapter_only and not _is_adapter_param(key):
+            continue
         target_value = target_state.get(key)
         if target_value is None:
             continue
@@ -803,7 +815,7 @@ def apply_lora(
         "to_layer": config.to_layer,
         "allow_depthwise": config.allow_depthwise,
         "kernels": config.kernels,
-        "skip_stem": getattr(config, "skip_stem", False),
+        "skip_stem": getattr(config, "skip_stem", True),  # Default True: skip un-normalized stem layers (prevents FP16 NaN)
         "min_channels": getattr(config, "min_channels", 0),
         "target_modules": config.target_modules, # This might be ['conv']
         "gradient_checkpointing": config.gradient_checkpointing,

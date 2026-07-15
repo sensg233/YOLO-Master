@@ -165,7 +165,7 @@ class MoLoRAConfigBuilder(LoRAConfigBuilder):
             "to_layer": kwargs.get("to_layer"),
             "allow_depthwise": kwargs.get("allow_depthwise", False),
             "kernels": kwargs.get("kernels"),
-            "skip_stem": kwargs.get("skip_stem", False),
+            "skip_stem": kwargs.get("skip_stem", True),  # Default to True: skip un-normalized stem layers (prevents FP16 NaN)
             "min_channels": kwargs.get("min_channels", 0),
             "only_3x3": kwargs.get("only_3x3", False),
         }

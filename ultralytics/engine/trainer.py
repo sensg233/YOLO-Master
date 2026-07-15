@@ -2231,14 +2231,22 @@ class BaseTrainer:
         self.resume = resume
 
     def _restore_lora_resume_model(self, ckpt):
-        """Restore LoRA-aware model weights from a resume checkpoint before optimizer state loading."""
+        """Restore LoRA-aware model weights from a resume checkpoint before optimizer state loading.
+
+        CRITICAL: Only adapter parameters are restored from the EMA checkpoint.
+        Base model weights are NEVER touched because EMA averages may contain
+        stale or corrupted base weights from earlier failed runs.  The pre-trained
+        backbone must remain pristine.
+        """
         if not ckpt or not ckpt.get("ema"):
             return
         target = unwrap_model(self.model)
         if not getattr(target, "lora_enabled", False):
             return
         source_state = ckpt["ema"].float().state_dict()
-        load_lora_compatible_state_dict(target, source_state, context="resume checkpoint EMA")
+        load_lora_compatible_state_dict(
+            target, source_state, context="resume checkpoint EMA", adapter_only=True
+        )
 
     def _load_checkpoint_state(self, ckpt):
         """Load optimizer, scaler, EMA, and best_fitness from checkpoint."""
@@ -2260,7 +2268,11 @@ class BaseTrainer:
             ema_state = ckpt["ema"].float().state_dict()
             ema_target = unwrap_model(self.ema.ema)
             if getattr(ema_target, "lora_enabled", False):
-                load_lora_compatible_state_dict(ema_target, ema_state, context="resume checkpoint EMA model")
+                # Only restore adapter weights into EMA; base weights are copied
+                # from the freshly loaded pre-trained model above.
+                load_lora_compatible_state_dict(
+                    ema_target, ema_state, context="resume checkpoint EMA model", adapter_only=True
+                )
             else:
                 self.ema.ema.load_state_dict(ema_state)
             self.ema.updates = ckpt["updates"]
@@ -2312,7 +2324,7 @@ class BaseTrainer:
         ema_state = ckpt["ema"].float().state_dict()
         target = unwrap_model(self.model)
         if getattr(target, "lora_enabled", False):
-            load_lora_compatible_state_dict(target, ema_state, context="NaN recovery checkpoint EMA")
+            load_lora_compatible_state_dict(target, ema_state, context="NaN recovery checkpoint EMA", adapter_only=True)
         else:
             target.load_state_dict(ema_state)
         self._load_checkpoint_state(ckpt)
