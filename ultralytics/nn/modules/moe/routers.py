@@ -1,8 +1,11 @@
 # 🐧Please note that this file has been modified by Tencent on 2026/02/07. All Tencent Modifications are Copyright (C) 2026 Tencent.
 """Efficient routers for Mixture-of-Experts models"""
+import json
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from urllib.request import Request, urlopen
 from typing import Tuple, Optional, Dict
 from .utils import FlopsUtils, get_safe_groups
 from ultralytics.utils.errors import MoERouterError, ShapeMismatchError
@@ -45,6 +48,42 @@ def _validate_router_input(x: torch.Tensor, expected_channels: int, context: str
             context=context or "router input",
         )
     if torch.isnan(x).any() or torch.isinf(x).any():
+        #region debug-point router-nonfinite
+        if os.getenv("ULTRA_DEBUG_NONFINITE", ""):
+            try:
+                finite = torch.isfinite(x)
+                nonfinite = (~finite).sum().item()
+                total = x.numel()
+                if finite.any():
+                    x_finite = x[finite]
+                    x_min = float(x_finite.min().item())
+                    x_max = float(x_finite.max().item())
+                else:
+                    x_min = None
+                    x_max = None
+                payload = {
+                    "event": "router_input_nonfinite",
+                    "context": context,
+                    "shape": list(x.shape),
+                    "dtype": str(x.dtype),
+                    "device": str(x.device),
+                    "nonfinite": int(nonfinite),
+                    "total": int(total),
+                    "min": x_min,
+                    "max": x_max,
+                }
+                url = os.getenv("ULTRA_DEBUG_POST_URL", "")
+                if url:
+                    body = json.dumps(payload, separators=(",", ":")).encode()
+                    req = Request(url, data=body, headers={"Content-Type": "application/json"})
+                    urlopen(req, timeout=1.0).close()
+                else:
+                    from ultralytics.utils import LOGGER
+
+                    LOGGER.warning(f"[debug-point router-nonfinite] {payload}")
+            except Exception:
+                pass
+        #endregion debug-point router-nonfinite
         raise MoERouterError(
             f"Router input contains NaN/Inf values"
             + (f" [{context}]" if context else "")

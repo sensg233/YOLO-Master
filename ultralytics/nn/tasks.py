@@ -1,11 +1,14 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import contextlib
+import json
+import os
 import pickle
 import re
 import types
 from copy import deepcopy
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import torch
 import torch.nn as nn
@@ -230,7 +233,57 @@ class BaseModel(torch.nn.Module):
             if use_gc:
                 x = self._apply_checkpointing(m, x)
             else:
+                #region debug-point predict-nonfinite
+                if os.getenv("ULTRA_DEBUG_NONFINITE", "") and not self.training and not getattr(self, "_dbg_nonfinite_reported", False):
+                    try:
+                        if isinstance(x, torch.Tensor) and not bool(torch.isfinite(x).all().item()):
+                            payload = {
+                                "event": "predict_input_nonfinite",
+                                "module_i": int(getattr(m, "i", -1)),
+                                "module": getattr(m, "type", m.__class__.__name__),
+                                "shape": list(x.shape),
+                                "dtype": str(x.dtype),
+                                "device": str(x.device),
+                            }
+                            url = os.getenv("ULTRA_DEBUG_POST_URL", "")
+                            if url:
+                                body = json.dumps(payload, separators=(",", ":")).encode()
+                                req = Request(url, data=body, headers={"Content-Type": "application/json"})
+                                urlopen(req, timeout=1.0).close()
+                            else:
+                                from ultralytics.utils import LOGGER
+
+                                LOGGER.warning(f"[debug-point predict-nonfinite] {payload}")
+                            self._dbg_nonfinite_reported = True
+                    except Exception:
+                        pass
+                #endregion debug-point predict-nonfinite
                 x = m(x)  # run
+                #region debug-point predict-nonfinite-post
+                if os.getenv("ULTRA_DEBUG_NONFINITE", "") and not self.training and not getattr(self, "_dbg_nonfinite_reported", False):
+                    try:
+                        if isinstance(x, torch.Tensor) and not bool(torch.isfinite(x).all().item()):
+                            payload = {
+                                "event": "predict_output_nonfinite",
+                                "module_i": int(getattr(m, "i", -1)),
+                                "module": getattr(m, "type", m.__class__.__name__),
+                                "shape": list(x.shape),
+                                "dtype": str(x.dtype),
+                                "device": str(x.device),
+                            }
+                            url = os.getenv("ULTRA_DEBUG_POST_URL", "")
+                            if url:
+                                body = json.dumps(payload, separators=(",", ":")).encode()
+                                req = Request(url, data=body, headers={"Content-Type": "application/json"})
+                                urlopen(req, timeout=1.0).close()
+                            else:
+                                from ultralytics.utils import LOGGER
+
+                                LOGGER.warning(f"[debug-point predict-nonfinite-post] {payload}")
+                            self._dbg_nonfinite_reported = True
+                    except Exception:
+                        pass
+                #endregion debug-point predict-nonfinite-post
             
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
