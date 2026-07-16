@@ -2102,7 +2102,15 @@ class BaseTrainer:
                 return None, None  # skip validation — rank is likely dead
 
         self._sync_ema_buffers_for_validation()
-        metrics = self.validator(self)
+        try:
+            metrics = self.validator(self)
+        except Exception as e:
+            from ultralytics.utils.errors import MoERouterError
+
+            if isinstance(e, MoERouterError):
+                LOGGER.warning(f"Validation failed with nonfinite router input: {e}")
+                return {}, float("nan")
+            raise
         if metrics is None:
             return None, None
         fitness = metrics.pop("fitness", -self.loss.detach().cpu().numpy())  # use loss as fitness measure if not found

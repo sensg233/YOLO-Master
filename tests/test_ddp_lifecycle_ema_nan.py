@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from ultralytics.engine.trainer import BaseTrainer
+from ultralytics.utils.errors import MoERouterError
 from ultralytics.utils.torch_utils import ModelEMA
 
 
@@ -115,6 +116,20 @@ def test_gradient_recovery_preserves_reduced_scaler_state(tmp_path):
 
     assert t._handle_nan_recovery(0) is True
     t.scaler.load_state_dict.assert_called_once_with({"scale": 32768.0})
+
+
+def test_validate_converts_router_nan_to_recovery_signal():
+    t = object.__new__(BaseTrainer)
+    t.loss = torch.tensor(1.0)
+    t.best_fitness = 0.0
+    t._sync_ema_buffers_for_validation = MagicMock()
+    t.validator = MagicMock(side_effect=MoERouterError("Router input contains NaN/Inf values [EfficientSpatialRouter]"))
+
+    with patch("ultralytics.engine.trainer.RANK", -1):
+        metrics, fitness = t.validate()
+
+    assert metrics == {}
+    assert fitness != fitness
 
 
 def test_checkpoint_restore_tolerates_missing_lazy_ema_buffer():
