@@ -20,7 +20,7 @@ def main():
  dist.init_process_group(a.backend,timeout=timedelta(seconds=60))
  try:
   model=Sparse().to(device); model.cpu_diagnostic=torch.tensor(float(rank))
-  ddp=DDP(model,device_ids=[local] if device.type=='cuda' else None,output_device=local if device.type=='cuda' else None,find_unused_parameters=True,broadcast_buffers=False,static_graph=True)
+  ddp=DDP(model,device_ids=[local] if device.type=='cuda' else None,output_device=local if device.type=='cuda' else None,find_unused_parameters=True,broadcast_buffers=False,static_graph=False)
   opt=torch.optim.SGD(ddp.parameters(),lr=.1); opt.zero_grad(); ddp(torch.ones(2,4,device=device),rank).backward(); opt.step()
   flat=torch.cat([p.detach().reshape(-1) for p in ddp.module.parameters()]); gathered=[torch.empty_like(flat) for _ in range(world)]; dist.all_gather(gathered,flat)
   assert all(torch.allclose(gathered[0],v) for v in gathered[1:]); assert ddp.module.cpu_diagnostic.device.type=='cpu'

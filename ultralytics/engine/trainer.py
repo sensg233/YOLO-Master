@@ -777,7 +777,10 @@ class BaseTrainer:
                 # Lazy MoE diagnostics can be CPU tensors; NCCL cannot broadcast them.
                 # BatchNorm running stats are rank-local; use SyncBatchNorm for global stats.
                 broadcast_buffers=False,
-                static_graph=True,
+                # HybridAdaptiveGateMoE still mixes fused and sparse expert
+                # backends in v0.6, so the used-parameter set can change across
+                # iterations even after the DDP-safe dense fallbacks below.
+                static_graph=False,
             )
 
         self.ema = ModelEMA(self.model)
