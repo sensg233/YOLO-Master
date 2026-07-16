@@ -1684,7 +1684,9 @@ class BaseTrainer:
             self._record_nonfinite_diagnostic(
                 "gradient", epoch=getattr(self, "epoch", -1), step=getattr(self, "ni", -1), parameter=bad_parameter
             )
-            self.optimizer.zero_grad()
+            if not self.scaler.is_enabled():
+                self.optimizer.zero_grad()
+                return
             # scaler.update() alone cannot downscale because it needs the
             # found_inf state that step() records.  Calling step() here lets
             # GradScaler detect the inf/NaN gradients, skip the optimizer step,
@@ -1693,6 +1695,7 @@ class BaseTrainer:
             # continues to produce NaN gradients.  (PyTorch issue-like pattern.)
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            self.optimizer.zero_grad()
             return
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
         self.scaler.step(self.optimizer)

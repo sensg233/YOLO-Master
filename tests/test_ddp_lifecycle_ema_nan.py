@@ -170,6 +170,46 @@ def test_gradient_recovery_preserves_reduced_scaler_state(tmp_path):
     t.scaler.load_state_dict.assert_called_once_with({"scale": 32768.0})
 
 
+def test_nonfinite_gradient_is_consumed_by_scaler_before_clear():
+    class RecordingScaler:
+        def __init__(self):
+            self.events = []
+
+        def unscale_(self, optimizer):
+            self.events.append("unscale")
+
+        def get_scale(self):
+            return 65536.0
+
+        def is_enabled(self):
+            return True
+
+        def step(self, optimizer):
+            self.events.append("step")
+            assert trainer.optimizer.param_groups[0]["params"][0].grad is not None
+
+        def update(self):
+            self.events.append("update")
+
+    trainer = object.__new__(BaseTrainer)
+    trainer.model = nn.Linear(1, 1)
+    trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.01)
+    trainer.scaler = RecordingScaler()
+    trainer.ema = None
+    trainer._gradient_nonfinite = False
+    trainer._nonfinite_diagnostic = None
+    trainer.epoch = 0
+    trainer.ni = 0
+    trainer.loss = torch.tensor(1.0)
+    trainer.fitness = 0.0
+
+    trainer.model.weight.grad = torch.full_like(trainer.model.weight, float("nan"))
+    trainer.optimizer_step()
+
+    assert trainer.scaler.events == ["unscale", "step", "update"]
+    assert trainer.model.weight.grad is None
+
+
 def test_validate_converts_router_nan_to_recovery_signal():
     t = object.__new__(BaseTrainer)
     t.loss = torch.tensor(1.0)
