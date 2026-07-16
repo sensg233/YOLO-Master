@@ -1266,13 +1266,17 @@ class BaseTrainer:
             # Validation
             final_epoch = epoch + 1 >= self.epochs
             validated = False
+            recovered = False
             if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
-                self._clear_memory(threshold=0.5)  # prevent VRAM spike
-                self.metrics, self.fitness = self.validate()
-                validated = self.fitness is not None and math.isfinite(float(self.fitness))
+                recovered = self._recover_before_validation(epoch)
+                if not recovered:
+                    self._clear_memory(threshold=0.5)  # prevent VRAM spike
+                    self.metrics, self.fitness = self.validate()
+                    validated = self.fitness is not None and math.isfinite(float(self.fitness))
 
             # NaN recovery
-            recovered = self._handle_nan_recovery(epoch)
+            if not recovered:
+                recovered = self._handle_nan_recovery(epoch)
             self._finalize_moe_map_saturation_epoch(recovered=recovered, validated=validated)
             if recovered:
                 continue
@@ -1401,6 +1405,44 @@ class BaseTrainer:
         for n, m in self.model.named_modules():
             if any(filter(lambda f: f in n, self.freeze_layer_names)) and isinstance(m, nn.BatchNorm2d):
                 m.eval()
+
+    #region debug-point pre-validate-nonfinite
+    def _collect_prevalidation_nonfinite_flags(self):
+        """Collect non-finite model-state flags before validation begins."""
+        model_nonfinite = self.model is not None and not self._state_is_finite(unwrap_model(self.model))
+        ema_model = getattr(self.ema, "ema", None) if self.ema else None
+        ema_nonfinite = ema_model is not None and not self._state_is_finite(unwrap_model(ema_model))
+        local_flags = torch.tensor(
+            [int(model_nonfinite), int(ema_nonfinite)],
+            dtype=torch.int32,
+            device=self.device
+            if RANK != -1 and dist.is_initialized() and dist.get_backend() == "nccl"
+            else torch.device("cpu"),
+        )
+        if RANK != -1 and dist.is_initialized():
+            dist.all_reduce(local_flags, op=dist.ReduceOp.MAX)
+        flags = {
+            "model_nonfinite": bool(local_flags[0].item()),
+            "ema_nonfinite": bool(local_flags[1].item()),
+        }
+        if any(flags.values()):
+            LOGGER.warning(
+                "[debug-point pre-validate-nonfinite] "
+                f"model_nonfinite={flags['model_nonfinite']}, ema_nonfinite={flags['ema_nonfinite']}, "
+                f"gradient_nonfinite={bool(getattr(self, '_gradient_nonfinite', False))}"
+            )
+        return flags
+
+    def _recover_before_validation(self, epoch):
+        """Attempt recovery before validation if model or EMA already contains non-finite values."""
+        flags = self._collect_prevalidation_nonfinite_flags()
+        if not any(flags.values()):
+            return False
+        # Mark validation fitness as non-finite so the existing recovery path
+        # restores the last healthy checkpoint before EMA validation can run.
+        self.fitness = float("nan")
+        return self._handle_nan_recovery(epoch)
+    #endregion debug-point pre-validate-nonfinite
 
     @staticmethod
     def _state_is_finite(value):
@@ -1649,7 +1691,14 @@ class BaseTrainer:
         self.scaler.update()
         self.optimizer.zero_grad()
         if self.ema:
-            self.ema.update(self.model)
+            #region debug-point skip-ema-nonfinite
+            base_model = unwrap_model(self.model)
+            if self._state_is_finite(base_model):
+                self.ema.update(self.model)
+            elif not getattr(self, "_warned_skip_ema_nonfinite", False):
+                LOGGER.warning("[debug-point skip-ema-nonfinite] Skipping EMA update because model state is nonfinite.")
+                self._warned_skip_ema_nonfinite = True
+            #endregion debug-point skip-ema-nonfinite
         
         # v3: Update EMA teacher for progressive self-distillation
         if getattr(self.args, 'lora_few_shot_mode', False) and hasattr(self, 'teacher_ema') and self.teacher_ema is not None:

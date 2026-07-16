@@ -117,6 +117,37 @@ def test_gradient_recovery_preserves_reduced_scaler_state(tmp_path):
     t.scaler.load_state_dict.assert_called_once_with({"scale": 32768.0})
 
 
+def test_recover_before_validation_when_ema_is_nonfinite(tmp_path):
+    t = recovery_trainer(tmp_path, loss=1.0, fitness=0.2)
+    t.ema = SimpleNamespace(ema=nn.Linear(1, 1))
+    with torch.no_grad():
+        t.ema.ema.weight.fill_(float("nan"))
+    t._handle_nan_recovery = MagicMock(return_value=True)
+
+    assert t._recover_before_validation(0) is True
+    t._handle_nan_recovery.assert_called_once_with(0)
+    assert t.fitness != t.fitness
+
+
+def test_optimizer_step_skips_ema_update_for_nonfinite_model():
+    t = object.__new__(BaseTrainer)
+    t.model = nn.Linear(1, 1)
+    with torch.no_grad():
+        t.model.weight.fill_(float("nan"))
+    for p in t.model.parameters():
+        p.grad = torch.zeros_like(p)
+    t.optimizer = MagicMock()
+    t.scaler = MagicMock()
+    t.ema = MagicMock()
+    t._gradient_nonfinite = False
+    t._record_nonfinite_diagnostic = MagicMock()
+    t.args = SimpleNamespace(lora_few_shot_mode=False)
+
+    t.optimizer_step()
+
+    t.ema.update.assert_not_called()
+
+
 def test_checkpoint_restore_tolerates_missing_lazy_ema_buffer():
     t = object.__new__(BaseTrainer)
     t.model = nn.Linear(1, 1)
