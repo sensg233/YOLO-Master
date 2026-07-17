@@ -4,20 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from typing import Optional, Dict, Union, Tuple
+from typing import Optional, Dict, Union
+from ultralytics.nn.modules._numeric import all_reduce_mean, clamp_min_for_dtype
 from .scheduler import MoEDynamicScheduler, MoEDynamicSchedulerConfig
 
 
-def _dtype_clamp_min(tensor: torch.Tensor, min_val: float = 1e-6) -> torch.Tensor:
-    """Dtype-aware clamp_min that prevents fp16 underflow.
-
-    The literal 1e-6 underflows to 0.0 in float16, making clamp_min a no-op.
-    This helper uses the smallest representable positive value for the
-    tensor's dtype when the requested floor is below that threshold.
-    """
-    if tensor.dtype == torch.float16:
-        min_val = max(min_val, 1e-4)  # fp16 smallest stable positive
-    return tensor.clamp_min(min_val)
+_dtype_clamp_min = clamp_min_for_dtype
 
 
 def should_reduce_ddp(module: Optional[nn.Module] = None) -> bool:
@@ -33,37 +25,6 @@ def should_reduce_ddp(module: Optional[nn.Module] = None) -> bool:
         and dist.is_initialized()
         and dist.get_world_size() > 1
     )
-
-
-def all_reduce_mean(tensor: torch.Tensor) -> torch.Tensor:
-    """Average a tensor across DDP ranks (gradient-preserving, no-op on 1 GPU).
-
-    Returns the input unchanged when distributed is unavailable/uninitialised,
-    so single-GPU and CPU paths are untouched. Used to make per-block balance
-    statistics (expert usage) consistent across ranks, matching MoELoss.
-    """
-    if not (dist.is_available() and dist.is_initialized()):
-        return tensor
-    world = dist.get_world_size()
-    if world <= 1:
-        return tensor
-    # Reduce in float32 to avoid catastrophic precision loss when the model
-    # runs in float16/bfloat16 under AMP/DDP — summing low-precision tensors
-    # across many ranks accumulates large rounding error that cannot be
-    # recovered. Cast back to the original dtype after averaging.
-    orig_dtype = tensor.dtype
-    # NCCL backend only supports CUDA tensors. If the tensor is on CPU but
-    # the process group is NCCL, move it to the current CUDA device to avoid
-    # "No backend type associated with device type cpu".
-    if tensor.device.type == "cpu" and dist.get_backend() == "nccl":
-        tensor = tensor.cuda()
-    local = tensor.float()
-    global_value = local.detach().clone()
-    dist.all_reduce(global_value, op=dist.ReduceOp.SUM)
-    global_value = global_value / world
-    # c10d all_reduce has no autograd kernel. Keep its global numerical value,
-    # while routing gradients only through the local differentiable statistic.
-    return (local + (global_value - local.detach())).to(orig_dtype)
 
 
 def gshard_balance_loss(expert_usage: torch.Tensor, num_experts: int,
@@ -290,7 +251,7 @@ class MoELoss(nn.Module):
             # Requires expert_indices.
             if expert_indices is None:
                 raise ValueError("expert_indices is required for hard load balancing.")
-                
+
             usage = self._usage_from_expert_indices(expert_indices)
 
         # Balance Loss: N * sum(importance * usage)
@@ -375,7 +336,7 @@ class MoELoss(nn.Module):
                      (self.entropy_loss_coeff * entropy_loss) + \
                      (self.diversity_loss_coeff * diversity_loss) + \
                      (self.variance_loss_coeff * variance_loss)
-        
+
         # NaN Guard (Graph Safe) — count hits for periodic diagnostics.
         if not torch.isfinite(total_loss).all():
             self._nan_guard_hits += 1
@@ -399,5 +360,5 @@ class MoELoss(nn.Module):
                 "dynamic_schedule": schedule_state.to_dict() if schedule_state is not None else None,
                 "map_saturation_schedule": map_sat_state.to_dict() if map_sat_state is not None else None,
             }
-            
+
         return total_loss
