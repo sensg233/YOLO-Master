@@ -49,6 +49,9 @@ class C2fMoT(nn.Module):
         balance_loss_coeff: float = 0.01,
         e: float = 0.5,
         sparse_train: bool = False,
+        scene_aware_router: bool = False,
+        scene_hidden_dim: int | None = None,
+        scene_consistency_coeff: float = 0.0,
     ):
         super().__init__()
         self.c = int(c2 * e)
@@ -83,6 +86,9 @@ class C2fMoT(nn.Module):
                 balance_loss_coeff=balance_loss_coeff,
                 window_shift=bool(i % 2),
                 sparse_train=sparse_train,
+                scene_aware_router=scene_aware_router,
+                scene_hidden_dim=scene_hidden_dim,
+                scene_consistency_coeff=scene_consistency_coeff,
             )
             for i in range(n)
         )

@@ -16,7 +16,7 @@ import torch.nn as nn
 MIXTURE_DEFAULTS: dict[str, dict[str, Any]] = {
     "moe": {
         "balance_loss_coeff": 1.0,
-        "router_z_loss_coeff": 1.0,
+        "router_z_loss_coeff": 0.1,
         "noise_std": 0.5,
         "temperature": 1.0,
         "weight_threshold": 0.01,
@@ -33,6 +33,9 @@ MIXTURE_DEFAULTS: dict[str, dict[str, Any]] = {
         "router_z_loss_coeff": 0.01,
         "temperature": 1.0,
         "sparse_train": False,
+        "scene_aware_router": False,
+        "scene_hidden_dim": None,
+        "scene_consistency_coeff": 0.0,
         "aux_gain": 1.0,
     },
     "molora": {
@@ -67,6 +70,9 @@ CLI_FIELDS: dict[str, dict[str, str]] = {
         "router_z_loss_coeff": "mot_router_z_loss",
         "temperature": "mot_temperature",
         "sparse_train": "mot_sparse_train",
+        "scene_aware_router": "mot_scene_aware_router",
+        "scene_hidden_dim": "mot_scene_hidden_dim",
+        "scene_consistency_coeff": "mot_scene_consistency",
         "aux_gain": "mot_aux_gain",
     },
     "molora": {
@@ -112,7 +118,14 @@ def annotate_mixture_yaml_config(module: nn.Module, module_name: str, yaml_args:
                 explicit[key] = yaml_args[index]
     elif name == "C2fMoT":
         kind = "mot"
-        for index, key in ((6, "temperature"), (7, "balance_loss_coeff"), (9, "sparse_train")):
+        for index, key in (
+            (6, "temperature"),
+            (7, "balance_loss_coeff"),
+            (9, "sparse_train"),
+            (10, "scene_aware_router"),
+            (11, "scene_hidden_dim"),
+            (12, "scene_consistency_coeff"),
+        ):
             if len(yaml_args) > index:
                 explicit[key] = yaml_args[index]
     elif name == "MoABlock":
@@ -122,7 +135,15 @@ def annotate_mixture_yaml_config(module: nn.Module, module_name: str, yaml_args:
                 explicit[key] = yaml_args[index]
     elif name == "MoTBlock":
         kind = "mot"
-        for index, key in ((5, "temperature"), (6, "balance_loss_coeff"), (7, "router_z_loss_coeff"), (14, "sparse_train")):
+        for index, key in (
+            (5, "temperature"),
+            (6, "balance_loss_coeff"),
+            (7, "router_z_loss_coeff"),
+            (14, "sparse_train"),
+            (15, "scene_aware_router"),
+            (16, "scene_hidden_dim"),
+            (17, "scene_consistency_coeff"),
+        ):
             if len(yaml_args) > index:
                 explicit[key] = yaml_args[index]
     elif name == "A2C2fMoE":
@@ -276,6 +297,13 @@ def apply_mixture_config(model: nn.Module, resolved: ResolvedMixtureConfig) -> i
             if hasattr(module, "sparse_train") and "sparse_train" not in inherited_explicit:
                 module.sparse_train = bool(config["sparse_train"])
             router = getattr(module, "router", None)
+            if router is not None and "scene_aware_router" not in inherited_explicit:
+                if bool(config["scene_aware_router"]):
+                    router.enable_scene_aware(config["scene_hidden_dim"])
+                else:
+                    router.scene_aware = False
+            if hasattr(module, "scene_consistency_coeff") and "scene_consistency_coeff" not in inherited_explicit:
+                module.scene_consistency_coeff = max(0.0, float(config["scene_consistency_coeff"]))
             if router is not None and hasattr(router, "temperature") and "temperature" not in inherited_explicit:
                 if hasattr(router.temperature, "fill_"):
                     router.temperature.fill_(float(config["temperature"]))

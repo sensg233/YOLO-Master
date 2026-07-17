@@ -57,12 +57,16 @@ class MoTBlock(nn.Module):
         window_shift: bool = False,
         grid_align_corners: bool = True,
         sparse_train: bool = False,
+        scene_aware_router: bool = False,
+        scene_hidden_dim: Optional[int] = None,
+        scene_consistency_coeff: float = 0.0,
     ):
         super().__init__()
         assert 1 <= top_k <= self.NUM_EXPERTS
         self.top_k = top_k
         self.balance_loss_coeff = balance_loss_coeff
         self.sparse_train = sparse_train
+        self.scene_consistency_coeff = max(float(scene_consistency_coeff), 0.0)
         # Legacy YAML/checkpoints used balance_loss_coeff for z-loss only; when
         # router_z_loss_coeff is omitted, keep that behaviour for the z term.
         self.router_z_loss_coeff = balance_loss_coeff if router_z_loss_coeff is None else router_z_loss_coeff
@@ -96,6 +100,8 @@ class MoTBlock(nn.Module):
             use_spatial=use_spatial_router,
             temperature=temperature,
             exploration_eps=exploration_eps,
+            scene_aware=scene_aware_router,
+            scene_hidden_dim=scene_hidden_dim,
         )
 
         # Final output norm & projection
@@ -215,7 +221,9 @@ class MoTBlock(nn.Module):
         out = out + x
 
         # ── Auxiliary loss ───────────────────────────────────────────────
-        if self.training and (self.balance_loss_coeff > 0 or self.router_z_loss_coeff > 0):
+        if self.training and (
+            self.balance_loss_coeff > 0 or self.router_z_loss_coeff > 0 or self.scene_consistency_coeff > 0
+        ):
             aux = _mot_router_aux_loss(
                 weights,
                 router_logits,
@@ -224,8 +232,12 @@ class MoTBlock(nn.Module):
                 self.balance_loss_coeff,
                 self.router_z_loss_coeff,
             )
+            scene_consistency = self.router.scene_consistency_loss(weights)
+            if self.scene_consistency_coeff > 0:
+                aux = aux + self.scene_consistency_coeff * scene_consistency
         else:
             aux = x.new_zeros(())
+            scene_consistency = x.new_zeros(())
 
         self.last_aux_loss = aux
         publish_aux_loss(self, aux, kind="mot", training=self.training)
@@ -239,6 +251,10 @@ class MoTBlock(nn.Module):
                 "expert_usage": mean_w,
                 "mean_router_probs": mean_w,
                 "aux_loss": float(aux.detach()),
+                "scene_aware": self.router.scene_aware,
+                "scene_stats": self.router.last_scene_stats,
+                "scene_bias": self.router.last_scene_bias,
+                "scene_consistency_loss": float(scene_consistency.detach()),
             }
 
         return out, aux

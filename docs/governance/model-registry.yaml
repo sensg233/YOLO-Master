@@ -40,6 +40,17 @@ models:
     verified: [parse, forward, unit_tests, component_export_roundtrip, component_compile]
     export: {onnx: component_roundtrip, tensorrt: unverified}
 
+  - name: yolo-master-v0.10-mot-scene-n
+    path: ultralytics/cfg/models/master/v0_10/det/yolo-master-mot-scene-n.yaml
+    task: detect
+    status: experimental
+    blocks:
+      - VisualEnhancedAdaptiveGateMoE
+      - C2fMoT
+      - SceneAwareMoTRouter
+    verified: [parse, forward, unit_tests]
+    export: {onnx: unverified, tensorrt: unverified}
+
   - name: yolo26-master-n
     path: ultralytics/cfg/models/26/yolo26-master-n.yaml
     task: detect

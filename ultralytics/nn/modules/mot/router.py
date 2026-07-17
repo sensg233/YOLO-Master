@@ -1,13 +1,22 @@
 """Router and auxiliary-loss utilities for Mixture-of-Transformer."""
+
 from __future__ import annotations
+
 from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from ultralytics.nn.modules._numeric import stable_normalize
 from ultralytics.nn.modules.moe import loss as _moe_loss
 from ultralytics.nn.modules.moe.utils import get_safe_groups as _safe_groups
-from ultralytics.nn.modules.mot._constants import DEFAULT_MIN_TEMPERATURE, DEFAULT_TEMPERATURE_ANNEAL_FACTOR, ROUTER_LOGIT_LIMIT, ROUTER_Z_LOSS_LIMIT
+from ultralytics.nn.modules.mot._constants import (
+    DEFAULT_MIN_TEMPERATURE,
+    DEFAULT_TEMPERATURE_ANNEAL_FACTOR,
+    ROUTER_LOGIT_LIMIT,
+    ROUTER_Z_LOSS_LIMIT,
+)
 
 def differentiable_balance_loss(
     router_probs: torch.Tensor,
@@ -63,9 +72,17 @@ class _MoTRouter(nn.Module):
         temperature (float): Softmax temperature for soft routing.
     """
 
-    def __init__(self, dim: int, num_experts: int = 3, top_k: int = 2,
-                 use_spatial: bool = True, temperature: float = 1.0,
-                 exploration_eps: float = 0.02):
+    def __init__(
+        self,
+        dim: int,
+        num_experts: int = 3,
+        top_k: int = 2,
+        use_spatial: bool = True,
+        temperature: float = 1.0,
+        exploration_eps: float = 0.02,
+        scene_aware: bool = False,
+        scene_hidden_dim: Optional[int] = None,
+    ):
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
@@ -95,10 +112,87 @@ class _MoTRouter(nn.Module):
         nn.init.zeros_(self.router[-1].weight)
         nn.init.zeros_(self.router[-1].bias)
 
+        self.scene_aware = False
+        self.scene_hidden_dim = scene_hidden_dim
+        self.scene_projector: Optional[nn.Sequential] = None
+        self.last_scene_stats: Optional[torch.Tensor] = None
+        self.last_scene_bias: Optional[torch.Tensor] = None
+        self._last_scene_stats_for_loss: Optional[torch.Tensor] = None
+        if scene_aware:
+            self.enable_scene_aware(scene_hidden_dim)
+
+    def enable_scene_aware(self, hidden_dim: Optional[int] = None) -> None:
+        """Enable the zero-initialized scene residual, creating parameters once."""
+        if self.scene_projector is None:
+            hidden = int(hidden_dim or self.scene_hidden_dim or 3)
+            if hidden <= 0:
+                raise ValueError("scene_hidden_dim must be positive")
+            self.scene_projector = nn.Sequential(
+                nn.Linear(3, hidden),
+                nn.SiLU(inplace=True),
+                nn.Linear(hidden, self.num_experts),
+            )
+            nn.init.zeros_(self.scene_projector[-1].weight)
+            nn.init.zeros_(self.scene_projector[-1].bias)
+            self.scene_hidden_dim = hidden
+        self.scene_aware = True
+
+    @staticmethod
+    def compute_scene_stats(x: torch.Tensor) -> torch.Tensor:
+        """Compute differentiable high-frequency, heterogeneity, and scale statistics."""
+        feature = x.float()
+        eps = torch.finfo(feature.dtype).eps
+        rms = feature.square().mean(dim=(1, 2, 3)).sqrt().clamp_min(eps)
+
+        dx = (feature[..., 1:] - feature[..., :-1]).abs().mean(dim=(1, 2, 3)) if feature.shape[-1] > 1 else rms * 0
+        dy = (feature[..., 1:, :] - feature[..., :-1, :]).abs().mean(dim=(1, 2, 3)) if feature.shape[-2] > 1 else rms * 0
+        high_frequency = 0.5 * (dx + dy) / rms
+
+        spatial_energy = feature.square().mean(dim=1)
+        heterogeneity = spatial_energy.flatten(1).std(dim=1, unbiased=False) / spatial_energy.flatten(1).mean(dim=1).clamp_min(eps)
+
+        pooled2 = F.adaptive_avg_pool2d(feature, (min(2, feature.shape[-2]), min(2, feature.shape[-1])))
+        pooled4 = F.adaptive_avg_pool2d(feature, (min(4, feature.shape[-2]), min(4, feature.shape[-1])))
+        scale2 = pooled2.var(dim=(1, 2, 3), unbiased=False)
+        scale4 = pooled4.var(dim=(1, 2, 3), unbiased=False)
+        multi_scale = (scale4 - scale2).abs() / feature.var(dim=(1, 2, 3), unbiased=False).clamp_min(eps)
+
+        return torch.stack((high_frequency, heterogeneity, multi_scale), dim=1)
+
+    def scene_consistency_loss(
+        self,
+        weights: torch.Tensor,
+        scene_stats: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Align Local, Window, and Deformable probabilities with scene statistics."""
+        if self.num_experts != 3:
+            return weights.new_zeros(())
+        stats = self._last_scene_stats_for_loss if scene_stats is None else scene_stats
+        if stats is None:
+            return weights.new_zeros(())
+        target_scores = torch.stack((stats[:, 0], stats[:, 2], stats[:, 1]), dim=1)
+        target = F.softmax(target_scores.detach(), dim=1)
+        probs = weights.float().mean(dim=(2, 3)).clamp_min(1e-8)
+        probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(1e-8)
+        return F.kl_div(probs.log(), target, reduction="batchmean")
+
     def _compute_logits(self, x: torch.Tensor) -> torch.Tensor:
         logits = self.router(x)
         if not self.use_spatial:
             logits = logits.unsqueeze(-1).unsqueeze(-1)
+        if self.scene_aware:
+            if self.scene_projector is None:
+                raise RuntimeError("scene-aware MoT router is enabled without a scene projector")
+            scene_stats = self.compute_scene_stats(x)
+            scene_bias = self.scene_projector(scene_stats).to(dtype=logits.dtype)
+            logits = logits + scene_bias.unsqueeze(-1).unsqueeze(-1)
+            self._last_scene_stats_for_loss = scene_stats
+            self.last_scene_stats = scene_stats.detach()
+            self.last_scene_bias = scene_bias.detach()
+        else:
+            self._last_scene_stats_for_loss = None
+            self.last_scene_stats = None
+            self.last_scene_bias = None
         return logits
 
     @staticmethod

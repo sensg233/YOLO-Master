@@ -342,6 +342,20 @@ python3 scripts/compare_mot_ablation.py \
 | A3 | v0.8 MoA+MoT | 联合收益 | mAP50 >= max(A1,A2)，且延迟符合资源目标 |
 | A4 | MoT top_k=1 | 高效路由 | 延迟下降，mAP 不明显退化 |
 | A5 | MoT balance=0 | z-loss 消融 | 观察路由坍缩与 mAP 变化 |
+| A6 | v0.10 MoT scene-aware | 场景统计残差 + consistency=0.01 | 与 v0.10 MoT 同设置对照；验证 mAP、APs/m/l 与场景路由差异 |
+
+### Scene-aware MoT 第一阶段验收
+
+新增实验配置：`ultralytics/cfg/models/master/v0_10/det/yolo-master-mot-scene-n.yaml`。该配置只启用零初始化的场景残差分支和较小的一致性损失，不改变原有 v0.10 MoT 配置或其 checkpoint 结构。
+
+A6 与 v0.10 MoT、MoE 基线必须使用相同数据划分、预训练权重、增强、seed、epoch、batch 和输入分辨率。至少记录：
+
+- `mAP50-95`、`mAP50`、`AP_s`、`AP_m`、`AP_l`
+- GPU latency P50/P95/P99、峰值显存和参数量
+- 四类场景下三个专家的 top-1 share 与 mean weight
+- 不规则/遮挡场景相对规则场景的 Deformable 激活差异及置信区间
+
+在完成 VisDrone 50 epoch 对照前，scene-aware MoT 保持 `experimental`。接受条件是：相对 MoE 基线 `mAP50-95` 至少持平，并且 Deformable 专家在不规则/遮挡子集上的激活显著高于非不规则场景；若仍低于基线，则按路线图将 MoT 维持实验级或降级，而不进入稳定模型。
 
 ### 7.2 完整 COCO 验证
 
