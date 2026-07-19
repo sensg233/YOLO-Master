@@ -4,6 +4,28 @@ from __future__ import annotations
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
+
+
+def should_reduce_ddp(module: nn.Module | None = None, *, training: bool | None = None) -> bool:
+    """Return whether this explicitly identified training forward may enter a DDP collective.
+
+    A missing module/training flag is deliberately treated as local-only. This
+    prevents eval-with-grad, export, profiling, or rank-0-only diagnostics from
+    joining the training collective sequence merely because gradients happen to
+    be globally enabled.
+    """
+    if training is None:
+        if module is None:
+            return False
+        training = module.training
+    return bool(
+        training
+        and torch.is_grad_enabled()
+        and dist.is_available()
+        and dist.is_initialized()
+        and dist.get_world_size() > 1
+    )
 
 
 def fp_clamp_floor(value: float, dtype: torch.dtype) -> float:

@@ -206,6 +206,13 @@ def test_moa_temperature_anneal():
     assert after == [max(t * 0.5, 0.3) for t in before]
 
 
+def test_moa_default_temperature_anneal_matches_shared_schedule():
+    module = C2fMoA(64, 64, n=1, num_heads=6)
+    anneal_moa_temperature(module)
+
+    assert [m.router.temperature for m in module.m] == [0.97]
+
+
 def test_moa_global_head_per_block_seed():
     """Relocated from test_mot.py — verifies per-block RF seed diversity."""
     b0 = MoABlock(64, num_heads=6, block_index=0)
