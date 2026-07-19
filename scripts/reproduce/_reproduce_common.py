@@ -71,10 +71,27 @@ class DatasetSpec:
     project: str       # e.g. "runs/reproduce/visdrone"
 
 
-# Both datasets train the same two models. EsMoE-N gets dense validation.
+# The two shared nano baselines. EsMoE-N gets dense validation (--no-sparse-eval).
 MODELS = (
     ModelSpec("v0.1-N", "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml", uses_esmoe=False),
     ModelSpec("EsMoE-N", "ultralytics/cfg/models/master/v0/det/yolo-master-n.yaml", uses_esmoe=True),
+)
+
+# The four variants derived from the two baselines, shared across every dataset script so the
+# reproducible model set stays consistent (the cfgs are dataset-agnostic -- nc is bound at build
+# time from the dataset yaml):
+#   * P2/4 head          -> EsMoE-P2-N, v0.1-P2-N  (extra stride-4 head for tiny objects)
+#   * UltraOptimizedMoE  -> UoMoE-N   (v0.1 with its ModularRouterExpertMoE blocks swapped for
+#                                      UltraOptimizedMoE: shared expert + batched sparse compute +
+#                                      ultra-light router, ~20-30% fewer GFLOPs at equal params)
+#                          UoMoE-P2-N (that swap + the P2/4 head)
+# EsMoE-P2-N contains ES_MOE blocks, so --no-sparse-eval gives it the corrected dense eval too.
+# The UoMoE models are sparse train==eval, so uses_esmoe=False (--no-sparse-eval is a no-op).
+VARIANTS = (
+    ModelSpec("EsMoE-P2-N", "ultralytics/cfg/models/master/v0/det/yolo-master-n-p2.yaml", uses_esmoe=True),
+    ModelSpec("v0.1-P2-N", "ultralytics/cfg/models/master/v0_1/det/yolo-master-n-p2.yaml", uses_esmoe=False),
+    ModelSpec("UoMoE-N", "ultralytics/cfg/models/master/v0_1/det/yolo-master-n-uomoe.yaml", uses_esmoe=False),
+    ModelSpec("UoMoE-P2-N", "ultralytics/cfg/models/master/v0_1/det/yolo-master-n-uomoe-p2.yaml", uses_esmoe=False),
 )
 
 
